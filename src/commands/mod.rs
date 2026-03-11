@@ -1,3 +1,4 @@
+pub mod about;
 pub mod auth;
 pub mod create;
 pub mod deploy;

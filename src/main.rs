@@ -22,6 +22,8 @@ enum Commands {
         #[arg(default_value = "mainnet")]
         network: String,
     },
+    /// Show OutLayer banner and version info
+    About,
     /// Delete stored credentials
     Logout,
     /// Show current account
@@ -328,6 +330,9 @@ async fn main() -> anyhow::Result<()> {
     let env_net = env_net.as_deref();
 
     match cli.command {
+        Commands::About => {
+            commands::about::about();
+        }
         Commands::Login { network } => {
             commands::auth::login(&network).await?;
         }
