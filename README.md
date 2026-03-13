@@ -147,6 +147,51 @@ Payment keys are required for HTTPS API calls. Created separately (requires USDC
 | `outlayer keys topup <nonce> <amount>` | Top up with NEAR (mainnet, swaps to USDC) |
 | `outlayer keys delete <nonce>` | Delete key (refunds storage) |
 
+### Payment Checks (Agent-to-Agent)
+
+Trustless agent-to-agent payments via ephemeral intents accounts. Requires a wallet API key (`outlayer register` or `POST /register`).
+
+| Command | Description |
+|---------|-------------|
+| `outlayer checks create <token> <amount>` | Create a payment check |
+| `outlayer checks batch-create --file <path>` | Batch create checks from JSON file |
+| `outlayer checks claim <check_key>` | Claim a check (full or partial) |
+| `outlayer checks reclaim <check_id>` | Reclaim unclaimed funds (full or partial) |
+| `outlayer checks status <check_id>` | Check status of a payment check |
+| `outlayer checks list` | List your payment checks |
+| `outlayer checks peek <check_key>` | Check balance of a check by key |
+
+```bash
+# Create a check for 1 USDC with memo and 24h expiry
+outlayer checks create 17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 1000000 \
+  --memo "Payment for task" --expires-in 86400
+
+# Claim (full)
+outlayer checks claim ed25519:5Kd3NBU...
+
+# Partial claim (take 0.5 USDC out of 1 USDC)
+outlayer checks claim ed25519:5Kd3NBU... --amount 500000
+
+# Reclaim (sender takes back)
+outlayer checks reclaim pc_a1b2c3d4e5f6
+
+# Partial reclaim
+outlayer checks reclaim pc_a1b2c3d4e5f6 --amount 300000
+
+# Check status
+outlayer checks status pc_a1b2c3d4e5f6
+
+# List unclaimed checks
+outlayer checks list --status unclaimed
+
+# Peek at check balance before claiming
+outlayer checks peek ed25519:5Kd3NBU...
+
+# Batch create from JSON
+outlayer checks batch-create --file checks.json
+# checks.json format: [{"token":"...","amount":"...","memo":"...","expires_in":86400}, ...]
+```
+
 ### Upload (FastFS)
 
 Upload files to on-chain storage via NEAR transactions (indexed by FastFS).
