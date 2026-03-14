@@ -7,7 +7,8 @@ use near_primitives::types::{AccountId, BlockReference, Finality};
 use near_primitives::views::FinalExecutionOutcomeView;
 use serde_json::Value;
 
-use crate::config::NetworkConfig;
+use crate::api::ApiClient;
+use crate::config::{self, Credentials, NetworkConfig};
 
 // ── NearClient (view calls, no auth) ───────────────────────────────────
 
@@ -313,6 +314,114 @@ impl NearSigner {
             .context("Failed to broadcast transaction")?;
 
         Ok(tx_hash)
+    }
+}
+
+// ── ContractCaller (local key or wallet API) ────────────────────────
+
+/// Result of a contract call — includes the parsed return value and tx hash.
+pub struct ContractCallResult {
+    pub value: Option<Value>,
+    pub tx_hash: Option<String>,
+}
+
+/// Unified interface for calling NEAR contracts — either with a local key
+/// (NearSigner) or via the coordinator wallet API (wallet_key).
+pub enum ContractCaller {
+    Local(NearSigner),
+    Wallet {
+        api: ApiClient,
+        wallet_key: String,
+        contract_id: String,
+    },
+}
+
+impl ContractCaller {
+    /// Build a ContractCaller from stored credentials.
+    pub fn from_credentials(creds: &Credentials, network: &NetworkConfig) -> Result<Self> {
+        if creds.is_wallet_key() {
+            let wk = creds
+                .wallet_key
+                .as_ref()
+                .context("wallet_key missing from credentials")?;
+            Ok(Self::Wallet {
+                api: ApiClient::new(network),
+                wallet_key: wk.clone(),
+                contract_id: network.contract_id.clone(),
+            })
+        } else {
+            let pk = config::load_private_key(&network.network_id, &creds.account_id, creds)?;
+            Ok(Self::Local(NearSigner::new(
+                network,
+                &creds.account_id,
+                &pk,
+            )?))
+        }
+    }
+
+    /// Call a method on the OutLayer contract. Returns parsed result value and tx hash.
+    pub async fn call_contract(
+        &self,
+        method_name: &str,
+        args: Value,
+        gas: u64,
+        deposit: u128,
+    ) -> Result<ContractCallResult> {
+        match self {
+            Self::Local(signer) => {
+                let outcome = signer.call_contract(method_name, args, gas, deposit).await?;
+                let tx_hash = Some(outcome.transaction_outcome.id.to_string());
+                match &outcome.status {
+                    near_primitives::views::FinalExecutionStatus::SuccessValue(bytes) => {
+                        Ok(ContractCallResult {
+                            value: serde_json::from_slice::<Value>(bytes).ok(),
+                            tx_hash,
+                        })
+                    }
+                    near_primitives::views::FinalExecutionStatus::Failure(err) => {
+                        anyhow::bail!(
+                            "Transaction failed (tx: {}): {:?}",
+                            outcome.transaction_outcome.id, err
+                        );
+                    }
+                    _ => Ok(ContractCallResult {
+                        value: None,
+                        tx_hash,
+                    }),
+                }
+            }
+            Self::Wallet {
+                api,
+                wallet_key,
+                contract_id,
+            } => {
+                let resp = api
+                    .wallet_call(wallet_key, contract_id, method_name, args, gas, deposit)
+                    .await?;
+                if resp.status == "pending_approval" {
+                    if let Some(id) = &resp.approval_id {
+                        anyhow::bail!(
+                            "Transaction requires approval (approval_id: {}). \
+                             Approve it in the wallet dashboard.",
+                            id
+                        );
+                    }
+                    anyhow::bail!("Transaction requires approval.");
+                }
+                if resp.status != "success" {
+                    let detail = resp.result.as_ref().map(|v| v.to_string()).unwrap_or_default();
+                    let tx_info = resp.tx_hash.as_deref().unwrap_or("unknown");
+                    anyhow::bail!(
+                        "Transaction failed (tx: {}, status: {}): {}",
+                        tx_info, resp.status, detail
+                    );
+                }
+                Ok(ContractCallResult {
+                    tx_hash: resp.tx_hash,
+                    value: resp.result,
+                })
+            }
+        }
     }
 }
 

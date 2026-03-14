@@ -559,6 +559,47 @@ impl ApiClient {
             .context("Failed to parse sign message response")
     }
 
+    /// POST /wallet/v1/call — sign and send a NEAR function call via custody wallet
+    pub async fn wallet_call(
+        &self,
+        wallet_key: &str,
+        receiver_id: &str,
+        method_name: &str,
+        args: serde_json::Value,
+        gas: u64,
+        deposit: u128,
+    ) -> Result<WalletCallResponse> {
+        let url = format!("{}/wallet/v1/call", self.base_url);
+
+        let body = serde_json::json!({
+            "receiver_id": receiver_id,
+            "method_name": method_name,
+            "args": args,
+            "gas": gas.to_string(),
+            "deposit": deposit.to_string(),
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", wallet_key))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to call wallet API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Wallet call failed ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse wallet call response")
+    }
+
     /// POST /wallet/v1/payment-check/peek
     pub async fn peek_payment_check(
         &self,
@@ -663,6 +704,18 @@ pub struct SignMessageResponse {
     pub signature: String,
     pub public_key: String,
     pub nonce: String,
+}
+
+// ── Wallet Call Response Type ─────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct WalletCallResponse {
+    pub request_id: String,
+    pub status: String,
+    pub tx_hash: Option<String>,
+    pub result: Option<serde_json::Value>,
+    pub approval_id: Option<String>,
 }
 
 // ── Payment Check Response Types ──────────────────────────────────────

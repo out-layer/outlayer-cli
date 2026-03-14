@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use crate::api::ApiClient;
 use crate::config::{self, Credentials, NetworkConfig};
 
 /// `outlayer login [network]` — import full access key
@@ -38,6 +39,8 @@ pub async fn login(network_name: &str) -> Result<()> {
         public_key: public_key.clone(),
         private_key: Some(secret_key),
         contract_id: network.contract_id.clone(),
+        auth_type: "near_key".to_string(),
+        wallet_key: None,
     };
 
     config::save_credentials(&network, &creds)?;
@@ -45,6 +48,42 @@ pub async fn login(network_name: &str) -> Result<()> {
 
     eprintln!("Logged in as {account_id} ({network_name})");
     eprintln!("Public key: {public_key}");
+
+    Ok(())
+}
+
+/// `outlayer login --wallet-key wk_...` — login with custody wallet API key
+pub async fn login_wallet_key(network_name: &str, wallet_key: &str) -> Result<()> {
+    if !wallet_key.starts_with("wk_") {
+        anyhow::bail!("Invalid wallet key format. Expected: wk_...");
+    }
+
+    let network = config::resolve_network(Some(network_name), None)?;
+    let api = ApiClient::new(&network);
+
+    eprintln!("Authenticating with wallet key...");
+
+    // Sign a message to derive account_id and public_key
+    let resp = api
+        .sign_message(wallet_key, "outlayer-cli-login", &network.contract_id, None)
+        .await
+        .context("Failed to authenticate wallet key. Check that the key is valid.")?;
+
+    let creds = Credentials {
+        account_id: resp.account_id.clone(),
+        public_key: resp.public_key.clone(),
+        private_key: None,
+        contract_id: network.contract_id.clone(),
+        auth_type: "wallet_key".to_string(),
+        wallet_key: Some(wallet_key.to_string()),
+    };
+
+    config::save_credentials(&network, &creds)?;
+    config::save_default_network(&network.network_id);
+
+    eprintln!("Logged in as {} ({network_name})", resp.account_id);
+    eprintln!("Public key: {}", resp.public_key);
+    eprintln!("Auth: wallet_key");
 
     Ok(())
 }
@@ -63,5 +102,6 @@ pub fn whoami(network: &NetworkConfig) -> Result<()> {
     println!("Network:  {}", network.network_id);
     println!("Contract: {}", creds.contract_id);
     println!("Key:      {}", creds.public_key);
+    println!("Auth:     {}", creds.auth_type);
     Ok(())
 }

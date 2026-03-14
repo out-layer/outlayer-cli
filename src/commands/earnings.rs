@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::api::ApiClient;
 use crate::config::{self, NetworkConfig};
-use crate::near::{NearClient, NearSigner};
+use crate::near::{ContractCaller, NearClient};
 
 /// `outlayer earnings` — show developer earnings
 pub async fn show(network: &NetworkConfig) -> Result<()> {
@@ -44,12 +44,11 @@ pub async fn show(network: &NetworkConfig) -> Result<()> {
 /// `outlayer earnings withdraw` — withdraw blockchain earnings
 pub async fn withdraw(network: &NetworkConfig) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let gas = 100_000_000_000_000u64; // 100 TGas
 
-    signer
+    caller
         .call_contract("withdraw_developer_earnings", json!({}), gas, 1) // 1 yoctoNEAR
         .await?;
 

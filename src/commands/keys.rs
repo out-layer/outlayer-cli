@@ -4,15 +4,14 @@ use serde_json::json;
 use crate::api::{ApiClient, GetPubkeyRequest};
 use crate::config::{self, NetworkConfig};
 use crate::crypto;
-use crate::near::{NearClient, NearSigner};
+use crate::near::{ContractCaller, NearClient};
 
 /// `outlayer keys create` — create a new payment key
 pub async fn create(network: &NetworkConfig) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
     let near = NearClient::new(network);
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let api = ApiClient::new(network);
 
     // Get next nonce
@@ -53,7 +52,7 @@ pub async fn create(network: &NetworkConfig) -> Result<()> {
     let deposit = 100_000_000_000_000_000_000_000u128; // 0.1 NEAR
     let gas = 100_000_000_000_000u64; // 100 TGas
 
-    signer
+    caller
         .call_contract(
             "store_secrets",
             json!({
@@ -155,7 +154,6 @@ pub async fn balance(network: &NetworkConfig, nonce: u32) -> Result<()> {
 /// `outlayer keys topup --nonce N --amount X` — top up with NEAR
 pub async fn topup(network: &NetworkConfig, nonce: u32, amount_near: f64) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
     if network.network_id != "mainnet" {
         anyhow::bail!("Top-up with NEAR is only available on mainnet.");
@@ -168,12 +166,12 @@ pub async fn topup(network: &NetworkConfig, nonce: u32, amount_near: f64) -> Res
         anyhow::bail!("Minimum top-up is 0.035 NEAR (0.01 deposit + 0.025 execution fees).");
     }
 
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let gas = 200_000_000_000_000u64; // 200 TGas (cross-contract calls)
 
     eprintln!("Topping up key nonce {nonce} with {amount_near} NEAR...");
 
-    signer
+    caller
         .call_contract(
             "top_up_payment_key_with_near",
             json!({
@@ -195,14 +193,13 @@ pub async fn topup(network: &NetworkConfig, nonce: u32, amount_near: f64) -> Res
 /// `outlayer keys delete --nonce N` — delete payment key
 pub async fn delete(network: &NetworkConfig, nonce: u32) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let gas = 100_000_000_000_000u64; // 100 TGas
 
     eprintln!("Deleting payment key nonce {nonce}...");
 
-    signer
+    caller
         .call_contract(
             "delete_payment_key",
             json!({ "nonce": nonce }),

@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::config::{self, NetworkConfig, ProjectConfig};
-use crate::near::{NearClient, NearSigner};
+use crate::near::{ContractCaller, NearClient};
 
 /// `outlayer versions` — list project versions
 pub async fn list(network: &NetworkConfig, project_config: &ProjectConfig) -> Result<()> {
@@ -49,12 +49,11 @@ pub async fn activate(
     version_key: &str,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let gas = 30_000_000_000_000u64; // 30 TGas
 
-    signer
+    caller
         .call_contract(
             "set_active_version",
             json!({
@@ -77,12 +76,11 @@ pub async fn remove(
     version_key: &str,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let gas = 30_000_000_000_000u64; // 30 TGas
 
-    signer
+    caller
         .call_contract(
             "remove_version",
             json!({

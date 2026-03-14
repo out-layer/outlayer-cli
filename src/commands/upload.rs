@@ -119,6 +119,15 @@ pub async fn upload(
     mime_type: Option<String>,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
+
+    if creds.is_wallet_key() {
+        anyhow::bail!(
+            "FastFS upload is not yet supported with wallet_key auth.\n\
+             Upload requires raw Borsh-encoded transaction args which the wallet API \
+             does not support yet. Use 'outlayer login' with a NEAR private key instead."
+        );
+    }
+
     let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
     // Read file

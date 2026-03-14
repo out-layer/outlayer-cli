@@ -11,6 +11,22 @@ pub struct Credentials {
     /// None if stored in OS keychain
     pub private_key: Option<String>,
     pub contract_id: String,
+    /// "near_key" (default) or "wallet_key"
+    #[serde(default = "default_auth_type")]
+    pub auth_type: String,
+    /// Wallet API key for custody-based auth (wk_...)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_key: Option<String>,
+}
+
+fn default_auth_type() -> String {
+    "near_key".to_string()
+}
+
+impl Credentials {
+    pub fn is_wallet_key(&self) -> bool {
+        self.auth_type == "wallet_key"
+    }
 }
 
 // ── Project Config (outlayer.toml) ─────────────────────────────────────

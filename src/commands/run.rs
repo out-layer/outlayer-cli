@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{ApiClient, HttpsCallRequest, SecretsRef};
 use crate::config::{self, NetworkConfig};
-use crate::near::{NearClient, NearSigner};
+use crate::near::{ContractCaller, NearClient};
 
 // ── Source types ──────────────────────────────────────────────────────
 
@@ -187,10 +187,8 @@ async fn run_on_chain(
     secrets_ref: Option<SecretsRef>,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
-
     let near = NearClient::new(network);
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
 
     let resource_limits = json!({
         "max_instructions": compute_limit.unwrap_or(1_000_000_000),
@@ -219,7 +217,7 @@ async fn run_on_chain(
         .map(|sr| json!({"profile": sr.profile, "account_id": sr.account_id}))
         .unwrap_or(Value::Null);
 
-    let outcome = signer
+    let result = caller
         .call_contract(
             "request_execution",
             json!({
@@ -237,20 +235,21 @@ async fn run_on_chain(
         .await
         .context("On-chain execution failed")?;
 
-    // Parse result
-    if let near_primitives::views::FinalExecutionStatus::SuccessValue(bytes) = &outcome.status {
-        if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
-            if !value.is_null() {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&value)
-                        .unwrap_or_else(|_| value.to_string())
-                );
-            }
+    if let Some(hash) = &result.tx_hash {
+        eprintln!("Tx: {hash}");
+    }
+
+    // Print result
+    if let Some(value) = &result.value {
+        if !value.is_null() {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(value)
+                    .unwrap_or_else(|_| value.to_string())
+            );
         }
     }
 
-    eprintln!("Tx: {}", outcome.transaction_outcome.id);
     Ok(())
 }
 

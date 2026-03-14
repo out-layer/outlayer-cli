@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::api::{ApiClient, GetPubkeyRequest};
 use crate::config::{self, NetworkConfig, ProjectConfig};
 use crate::crypto;
-use crate::near::{NearClient, NearSigner};
+use crate::near::{ContractCaller, NearClient};
 
 // ── Accessor Resolution ──────────────────────────────────────────────
 
@@ -137,7 +137,6 @@ pub async fn set(
     access_str: &str,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
     let accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
     let access = parse_access(access_str)?;
@@ -211,11 +210,11 @@ pub async fn set(
     };
 
     // Store on contract
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let deposit = 100_000_000_000_000_000_000_000u128; // 0.1 NEAR
     let gas = 50_000_000_000_000u64; // 50 TGas
 
-    signer
+    caller
         .call_contract(
             "store_secrets",
             json!({
@@ -265,7 +264,6 @@ pub async fn update(
     generate: Vec<String>,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
     let accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
     let generate_specs = parse_generate_specs(generate)?;
@@ -304,8 +302,20 @@ pub async fn update(
     let recipient = &network.contract_id;
 
     eprintln!("Signing update request...");
-    let (signature, public_key, nonce_base64) =
-        crypto::sign_nep413(&private_key, &message, recipient)?;
+
+    // Sign: local key or wallet API
+    let (signature, public_key, nonce_base64) = if creds.is_wallet_key() {
+        let wk = creds
+            .wallet_key
+            .as_ref()
+            .context("wallet_key missing from credentials")?;
+        let api = ApiClient::new(network);
+        let resp = api.sign_message(wk, &message, recipient, None).await?;
+        (resp.signature, resp.public_key, resp.nonce)
+    } else {
+        let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
+        crypto::sign_nep413(&private_key, &message, recipient)?
+    };
 
     // Build secrets to send (plaintext — coordinator encrypts inside TEE)
     let secrets_value = secrets_map
@@ -339,11 +349,11 @@ pub async fn update(
         .context("Failed to update secrets")?;
 
     // Store merged result on contract
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let deposit = 100_000_000_000_000_000_000_000u128; // 0.1 NEAR
     let gas = 50_000_000_000_000u64;
 
-    signer
+    caller
         .call_contract(
             "store_secrets",
             json!({
@@ -419,14 +429,13 @@ pub async fn delete(
     wasm_hash: Option<String>,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
 
     let accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
 
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
     let gas = 30_000_000_000_000u64; // 30 TGas
 
-    signer
+    caller
         .call_contract(
             "delete_secrets",
             json!({

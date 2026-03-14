@@ -16,11 +16,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Login with NEAR full access key
+    /// Login with NEAR full access key or wallet API key
     Login {
         /// mainnet (default) or testnet
         #[arg(default_value = "mainnet")]
         network: String,
+
+        /// Login with a custody wallet API key (wk_...) instead of NEAR private key
+        #[arg(long)]
+        wallet_key: Option<String>,
     },
     /// Show OutLayer banner and version info
     About,
@@ -410,8 +414,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::About => {
             commands::about::about();
         }
-        Commands::Login { network } => {
-            commands::auth::login(&network).await?;
+        Commands::Login { network, wallet_key } => {
+            if let Some(wk) = wallet_key {
+                commands::auth::login_wallet_key(&network, &wk).await?;
+            } else {
+                commands::auth::login(&network).await?;
+            }
         }
         Commands::Logout => {
             let network = config::resolve_network(env_net, None)?;

@@ -3,7 +3,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::config::{self, NetworkConfig};
-use crate::near::{NearClient, NearSigner};
+use crate::near::{ContractCaller, NearClient};
 
 /// `outlayer deploy <name>` — deploy agent to OutLayer
 pub async fn deploy(
@@ -15,7 +15,6 @@ pub async fn deploy(
     no_activate: bool,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
     let owner = &creds.account_id;
 
     let (source, version_label) = if let Some(url) = &wasm_url {
@@ -58,7 +57,7 @@ pub async fn deploy(
     }
 
     let near = NearClient::new(network);
-    let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
+    let caller = ContractCaller::from_credentials(&creds, network)?;
 
     let project_id = format!("{owner}/{project_name}");
     let deposit = 100_000_000_000_000_000_000_000u128; // 0.1 NEAR
@@ -69,7 +68,7 @@ pub async fn deploy(
 
     if existing.is_some() {
         eprintln!("  Adding version {version_label}...");
-        signer
+        caller
             .call_contract(
                 "add_version",
                 json!({
@@ -84,7 +83,7 @@ pub async fn deploy(
             .context("Failed to add version")?;
     } else {
         eprintln!("  Creating new project...");
-        signer
+        caller
             .call_contract(
                 "create_project",
                 json!({
