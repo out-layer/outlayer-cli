@@ -309,6 +309,284 @@ impl ApiClient {
 
         Ok(resp.pubkey)
     }
+
+    // ── Payment Check Methods ──────────────────────────────────────────
+
+    /// POST /wallet/v1/payment-check/create
+    pub async fn create_payment_check(
+        &self,
+        api_key: &str,
+        token: &str,
+        amount: &str,
+        memo: Option<&str>,
+        expires_in: Option<u64>,
+    ) -> Result<PaymentCheckCreateResponse> {
+        let url = format!("{}/wallet/v1/payment-check/create", self.base_url);
+
+        let mut body = serde_json::json!({
+            "token": token,
+            "amount": amount,
+        });
+        if let Some(memo) = memo {
+            body["memo"] = serde_json::Value::String(memo.to_string());
+        }
+        if let Some(expires_in) = expires_in {
+            body["expires_in"] = serde_json::Value::Number(expires_in.into());
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to create payment check")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to create payment check ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse create check response")
+    }
+
+    /// POST /wallet/v1/payment-check/batch-create
+    pub async fn batch_create_payment_checks(
+        &self,
+        api_key: &str,
+        checks: &[serde_json::Value],
+    ) -> Result<PaymentCheckBatchCreateResponse> {
+        let url = format!("{}/wallet/v1/payment-check/batch-create", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&serde_json::json!({ "checks": checks }))
+            .send()
+            .await
+            .context("Failed to batch create payment checks")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to batch create checks ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse batch create response")
+    }
+
+    /// POST /wallet/v1/payment-check/claim
+    pub async fn claim_payment_check(
+        &self,
+        api_key: &str,
+        check_key: &str,
+        amount: Option<&str>,
+    ) -> Result<PaymentCheckClaimResponse> {
+        let url = format!("{}/wallet/v1/payment-check/claim", self.base_url);
+
+        let mut body = serde_json::json!({ "check_key": check_key });
+        if let Some(amount) = amount {
+            body["amount"] = serde_json::Value::String(amount.to_string());
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to claim payment check")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to claim check ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse claim response")
+    }
+
+    /// POST /wallet/v1/payment-check/reclaim
+    pub async fn reclaim_payment_check(
+        &self,
+        api_key: &str,
+        check_id: &str,
+        amount: Option<&str>,
+    ) -> Result<PaymentCheckReclaimResponse> {
+        let url = format!("{}/wallet/v1/payment-check/reclaim", self.base_url);
+
+        let mut body = serde_json::json!({ "check_id": check_id });
+        if let Some(amount) = amount {
+            body["amount"] = serde_json::Value::String(amount.to_string());
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to reclaim payment check")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to reclaim check ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse reclaim response")
+    }
+
+    /// GET /wallet/v1/payment-check/status?check_id=...
+    pub async fn get_payment_check_status(
+        &self,
+        api_key: &str,
+        check_id: &str,
+    ) -> Result<PaymentCheckStatusResponse> {
+        let url = format!(
+            "{}/wallet/v1/payment-check/status?check_id={}",
+            self.base_url, check_id
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .context("Failed to get check status")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to get check status ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse check status response")
+    }
+
+    /// GET /wallet/v1/payment-check/list
+    pub async fn list_payment_checks(
+        &self,
+        api_key: &str,
+        status_filter: Option<&str>,
+        limit: i64,
+    ) -> Result<PaymentCheckListResponse> {
+        let mut url = format!(
+            "{}/wallet/v1/payment-check/list?limit={}",
+            self.base_url, limit
+        );
+        if let Some(status) = status_filter {
+            url.push_str(&format!("&status={}", status));
+        }
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .context("Failed to list payment checks")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to list checks ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse check list response")
+    }
+
+    /// POST /wallet/v1/sign-message — NEP-413 message signing for external auth
+    pub async fn sign_message(
+        &self,
+        api_key: &str,
+        message: &str,
+        recipient: &str,
+        nonce: Option<&str>,
+    ) -> Result<SignMessageResponse> {
+        let url = format!("{}/wallet/v1/sign-message", self.base_url);
+
+        let mut body = serde_json::json!({
+            "message": message,
+            "recipient": recipient,
+        });
+        if let Some(nonce) = nonce {
+            body["nonce"] = serde_json::Value::String(nonce.to_string());
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to sign message")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to sign message ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse sign message response")
+    }
+
+    /// POST /wallet/v1/payment-check/peek
+    pub async fn peek_payment_check(
+        &self,
+        api_key: &str,
+        check_key: &str,
+    ) -> Result<PaymentCheckPeekResponse> {
+        let url = format!("{}/wallet/v1/payment-check/peek", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&serde_json::json!({ "check_key": check_key }))
+            .send()
+            .await
+            .context("Failed to peek payment check")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to peek check ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse peek response")
+    }
 }
 
 // ── Response Types ─────────────────────────────────────────────────────
@@ -374,4 +652,86 @@ pub struct AddGeneratedSecretResponse {
 #[derive(Debug, Deserialize)]
 pub struct UpdateUserSecretsResponse {
     pub encrypted_secrets_base64: String,
+}
+
+// ── Sign Message Response Type ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct SignMessageResponse {
+    pub account_id: String,
+    pub signature: String,
+    pub public_key: String,
+    pub nonce: String,
+}
+
+// ── Payment Check Response Types ──────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaymentCheckCreateResponse {
+    pub check_id: String,
+    pub check_key: String,
+    pub token: String,
+    pub amount: String,
+    pub memo: Option<String>,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaymentCheckBatchCreateResponse {
+    pub checks: Vec<PaymentCheckCreateResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaymentCheckClaimResponse {
+    pub token: String,
+    pub amount_claimed: String,
+    pub remaining: String,
+    pub memo: Option<String>,
+    pub claimed_at: String,
+    pub intent_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaymentCheckReclaimResponse {
+    pub token: String,
+    pub amount_reclaimed: String,
+    pub remaining: String,
+    pub reclaimed_at: String,
+    pub intent_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaymentCheckStatusResponse {
+    pub check_id: String,
+    pub token: String,
+    pub amount: String,
+    pub claimed_amount: String,
+    pub reclaimed_amount: String,
+    pub status: String,
+    pub memo: Option<String>,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub claimed_at: Option<String>,
+    pub claimed_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaymentCheckListResponse {
+    pub checks: Vec<PaymentCheckStatusResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaymentCheckPeekResponse {
+    pub token: String,
+    pub balance: String,
+    pub memo: Option<String>,
+    pub status: String,
+    pub expires_at: Option<String>,
 }

@@ -1,5 +1,6 @@
 pub mod about;
 pub mod auth;
+pub mod checks;
 pub mod create;
 pub mod deploy;
 pub mod earnings;

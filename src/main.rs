@@ -165,6 +165,15 @@ enum Commands {
         /// Account ID (defaults to logged-in user)
         account: Option<String>,
     },
+    /// Manage payment checks (agent-to-agent payments)
+    Checks {
+        #[command(subcommand)]
+        command: ChecksCommands,
+
+        /// Wallet API key (or set OUTLAYER_WALLET_KEY env var)
+        #[arg(long, global = true)]
+        api_key: Option<String>,
+    },
     /// View execution history
     Logs {
         /// Payment key nonce (defaults to outlayer.toml config)
@@ -321,6 +330,74 @@ enum VersionsCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum ChecksCommands {
+    /// Create a payment check
+    Create {
+        /// Token contract ID (e.g. 17208628f...a1 for USDC)
+        token: String,
+        /// Amount in smallest denomination (e.g. 1000000 for 1 USDC)
+        amount: String,
+        /// Human-readable memo (max 256 chars)
+        #[arg(long)]
+        memo: Option<String>,
+        /// Expiry in seconds (e.g. 86400 for 24h)
+        #[arg(long)]
+        expires_in: Option<u64>,
+    },
+    /// Batch create checks from JSON file
+    BatchCreate {
+        /// JSON file with array of {token, amount, memo?, expires_in?}
+        #[arg(long)]
+        file: String,
+    },
+    /// Claim a payment check (full or partial)
+    Claim {
+        /// Check key received from sender (ed25519:...)
+        check_key: String,
+        /// Partial claim amount (smallest units). Omit for full claim.
+        #[arg(long)]
+        amount: Option<String>,
+    },
+    /// Reclaim unclaimed funds (full or partial)
+    Reclaim {
+        /// Check ID (pc_...)
+        check_id: String,
+        /// Partial reclaim amount (smallest units). Omit for full remaining.
+        #[arg(long)]
+        amount: Option<String>,
+    },
+    /// Get check status
+    Status {
+        /// Check ID (pc_...)
+        check_id: String,
+    },
+    /// List payment checks
+    List {
+        /// Filter by status: unclaimed, claimed, partially_claimed, reclaimed, expired
+        #[arg(long)]
+        status: Option<String>,
+        /// Number of entries
+        #[arg(long, default_value = "50")]
+        limit: i64,
+    },
+    /// Peek at check balance by key (before claiming)
+    Peek {
+        /// Check key (ed25519:...)
+        check_key: String,
+    },
+    /// Sign a message (NEP-413) for external service authentication
+    SignMessage {
+        /// Message to sign (max 10000 bytes)
+        message: String,
+        /// Recipient (the service verifying the signature)
+        recipient: String,
+        /// Base64-encoded 32-byte nonce (auto-generated if omitted)
+        #[arg(long)]
+        nonce: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -415,6 +492,62 @@ async fn main() -> anyhow::Result<()> {
                 }
                 KeysCommands::Delete { nonce } => {
                     commands::keys::delete(&network, nonce).await?
+                }
+            }
+        }
+        Commands::Checks { command, api_key } => {
+            let network = resolve_with_project(env_net)?;
+            let api_key_ref = api_key.as_deref();
+            match command {
+                ChecksCommands::Create {
+                    token,
+                    amount,
+                    memo,
+                    expires_in,
+                } => {
+                    commands::checks::create(
+                        &network,
+                        api_key_ref,
+                        &token,
+                        &amount,
+                        memo.as_deref(),
+                        expires_in,
+                    )
+                    .await?
+                }
+                ChecksCommands::BatchCreate { file } => {
+                    commands::checks::batch_create(&network, api_key_ref, &file).await?
+                }
+                ChecksCommands::Claim { check_key, amount } => {
+                    commands::checks::claim(&network, api_key_ref, &check_key, amount.as_deref())
+                        .await?
+                }
+                ChecksCommands::Reclaim { check_id, amount } => {
+                    commands::checks::reclaim(&network, api_key_ref, &check_id, amount.as_deref())
+                        .await?
+                }
+                ChecksCommands::Status { check_id } => {
+                    commands::checks::status(&network, api_key_ref, &check_id).await?
+                }
+                ChecksCommands::List { status, limit } => {
+                    commands::checks::list(&network, api_key_ref, status.as_deref(), limit).await?
+                }
+                ChecksCommands::Peek { check_key } => {
+                    commands::checks::peek(&network, api_key_ref, &check_key).await?
+                }
+                ChecksCommands::SignMessage {
+                    message,
+                    recipient,
+                    nonce,
+                } => {
+                    commands::checks::sign_message(
+                        &network,
+                        api_key_ref,
+                        &message,
+                        &recipient,
+                        nonce.as_deref(),
+                    )
+                    .await?
                 }
             }
         }
