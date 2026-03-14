@@ -170,7 +170,7 @@ pub async fn upload(
     }
 
     let fastfs_url = format!(
-        "https://{}.fastfs.io/{}/{}",
+        "https://main.fastfs.io/{}/{}/{}",
         creds.account_id, receiver_id, relative_path
     );
 
