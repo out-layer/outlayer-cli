@@ -600,6 +600,50 @@ impl ApiClient {
             .context("Failed to parse wallet call response")
     }
 
+    /// POST /wallet/v1/call with raw (Borsh) args as base64
+    pub async fn wallet_call_raw(
+        &self,
+        wallet_key: &str,
+        receiver_id: &str,
+        method_name: &str,
+        args_raw: &[u8],
+        gas: u64,
+        deposit: u128,
+    ) -> Result<WalletCallResponse> {
+        let url = format!("{}/wallet/v1/call", self.base_url);
+
+        use base64::Engine;
+        let args_b64 = base64::engine::general_purpose::STANDARD.encode(args_raw);
+
+        let body = serde_json::json!({
+            "receiver_id": receiver_id,
+            "method_name": method_name,
+            "args_base64": args_b64,
+            "gas": gas.to_string(),
+            "deposit": deposit.to_string(),
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", wallet_key))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to call wallet API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Wallet call failed ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse wallet call response")
+    }
+
     /// POST /wallet/v1/payment-check/peek
     pub async fn peek_payment_check(
         &self,
@@ -701,7 +745,10 @@ pub struct UpdateUserSecretsResponse {
 #[allow(dead_code)]
 pub struct SignMessageResponse {
     pub account_id: String,
+    /// Signature in NEAR format: "ed25519:<base58>"
     pub signature: String,
+    /// Signature as raw base64 (NEP-413 standard)
+    pub signature_base64: String,
     pub public_key: String,
     pub nonce: String,
 }

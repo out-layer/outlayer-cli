@@ -304,6 +304,7 @@ pub async fn update(
     eprintln!("Signing update request...");
 
     // Sign: local key or wallet API
+    // Both verifiers (keystore, coordinator) expect signature in base64 format.
     let (signature, public_key, nonce_base64) = if creds.is_wallet_key() {
         let wk = creds
             .wallet_key
@@ -311,10 +312,18 @@ pub async fn update(
             .context("wallet_key missing from credentials")?;
         let api = ApiClient::new(network);
         let resp = api.sign_message(wk, &message, recipient, None).await?;
-        (resp.signature, resp.public_key, resp.nonce)
+        (resp.signature_base64, resp.public_key, resp.nonce)
     } else {
         let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
-        crypto::sign_nep413(&private_key, &message, recipient)?
+        let (sig_near, pk, nonce) = crypto::sign_nep413(&private_key, &message, recipient)?;
+        // Convert ed25519:base58 → raw bytes → base64
+        let sig_b58 = sig_near.strip_prefix("ed25519:").unwrap_or(&sig_near);
+        let sig_bytes = bs58::decode(sig_b58).into_vec().context("Failed to decode signature base58")?;
+        let sig_base64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &sig_bytes,
+        );
+        (sig_base64, pk, nonce)
     };
 
     // Build secrets to send (plaintext — coordinator encrypts inside TEE)

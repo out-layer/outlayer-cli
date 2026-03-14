@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use borsh::BorshSerialize;
 use sha2::{Digest, Sha256};
 
+use crate::api::ApiClient;
 use crate::config::{self, NetworkConfig};
 use crate::near::NearSigner;
 
@@ -120,16 +121,6 @@ pub async fn upload(
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
 
-    if creds.is_wallet_key() {
-        anyhow::bail!(
-            "FastFS upload is not yet supported with wallet_key auth.\n\
-             Upload requires raw Borsh-encoded transaction args which the wallet API \
-             does not support yet. Use 'outlayer login' with a NEAR private key instead."
-        );
-    }
-
-    let private_key = config::load_private_key(&network.network_id, &creds.account_id, &creds)?;
-
     // Read file
     let content = std::fs::read(file_path)
         .with_context(|| format!("Failed to read file: {file_path}"))?;
@@ -172,11 +163,48 @@ pub async fn upload(
     }
     eprintln!();
 
+    if creds.is_wallet_key() {
+        upload_via_wallet(network, &creds, &receiver_id, &payloads).await?;
+    } else {
+        upload_via_near_key(network, &creds, &receiver_id, &payloads).await?;
+    }
+
+    let fastfs_url = format!(
+        "https://{}.fastfs.io/{}/{}",
+        creds.account_id, receiver_id, relative_path
+    );
+
+    eprintln!();
+    eprintln!("Upload complete!");
+    eprintln!();
+    eprintln!("FastFS URL: {fastfs_url}");
+    eprintln!();
+
+    if extension == "wasm" {
+        eprintln!("Run directly:");
+        eprintln!("  outlayer run --wasm {fastfs_url} '{{}}' ");
+        eprintln!();
+        eprintln!("Or deploy as project version:");
+        eprintln!("  outlayer deploy <name> --wasm-url {fastfs_url}");
+    }
+
+    Ok(())
+}
+
+/// Upload via direct NEAR transaction (private key auth).
+async fn upload_via_near_key(
+    network: &NetworkConfig,
+    creds: &config::Credentials,
+    receiver_id: &str,
+    payloads: &[Vec<u8>],
+) -> Result<()> {
+    let private_key = config::load_private_key(&network.network_id, &creds.account_id, creds)?;
     let receiver_account_id: near_primitives::types::AccountId = receiver_id
         .parse()
         .context("Invalid receiver account ID")?;
     let signer = NearSigner::new(network, &creds.account_id, &private_key)?;
     let (current_nonce, block_hash) = signer.get_tx_context().await?;
+    let num_chunks = payloads.len();
 
     for (i, payload) in payloads.iter().enumerate() {
         if num_chunks > 1 {
@@ -201,23 +229,47 @@ pub async fn upload(
         eprintln!("tx: {tx_hash}");
     }
 
-    let fastfs_url = format!(
-        "https://{}.fastfs.io/{}/{}",
-        creds.account_id, receiver_id, relative_path
-    );
+    Ok(())
+}
 
-    eprintln!();
-    eprintln!("Upload complete!");
-    eprintln!();
-    eprintln!("FastFS URL: {fastfs_url}");
-    eprintln!();
+/// Upload via wallet API (wallet_key auth) — sends Borsh args as base64.
+async fn upload_via_wallet(
+    network: &NetworkConfig,
+    creds: &config::Credentials,
+    receiver_id: &str,
+    payloads: &[Vec<u8>],
+) -> Result<()> {
+    let wallet_key = creds
+        .wallet_key
+        .as_ref()
+        .context("Missing wallet_key in credentials")?;
+    let api = ApiClient::new(network);
+    let num_chunks = payloads.len();
 
-    if extension == "wasm" {
-        eprintln!("Run directly:");
-        eprintln!("  outlayer run --wasm {fastfs_url} '{{}}' ");
-        eprintln!();
-        eprintln!("Or deploy as project version:");
-        eprintln!("  outlayer deploy <name> --wasm-url {fastfs_url}");
+    for (i, payload) in payloads.iter().enumerate() {
+        if num_chunks > 1 {
+            eprint!("  Uploading chunk {}/{}... ", i + 1, num_chunks);
+        } else {
+            eprint!("  Uploading... ");
+        }
+
+        let resp = api
+            .wallet_call_raw(
+                wallet_key,
+                receiver_id,
+                "__fastdata_fastfs",
+                payload,
+                1,  // gas=1
+                0,  // no deposit
+            )
+            .await
+            .with_context(|| format!("Failed to upload chunk {}/{}", i + 1, num_chunks))?;
+
+        if let Some(tx_hash) = &resp.tx_hash {
+            eprintln!("tx: {tx_hash}");
+        } else {
+            eprintln!("request: {}", resp.request_id);
+        }
     }
 
     Ok(())
