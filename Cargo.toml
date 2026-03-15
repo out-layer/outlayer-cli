@@ -9,6 +9,7 @@ homepage = "https://outlayer.ai"
 keywords = ["near", "outlayer", "agents", "cli", "wasm"]
 categories = ["command-line-utilities"]
 readme = "README.md"
+include = ["src/**/*", "templates/**/*", "Cargo.toml", "README.md", "LICENSE*"]
 
 [lib]
 name = "outlayer_cli"

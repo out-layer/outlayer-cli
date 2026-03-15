@@ -9,17 +9,17 @@ use crate::config::{
 // ── Embedded templates ──────────────────────────────────────────────────
 
 mod basic {
-    pub const CARGO_TOML: &str = include_str!("../../templates/basic/Cargo.toml");
+    pub const CARGO_TOML: &str = include_str!("../../templates/basic/Cargo.toml.tmpl");
     pub const MAIN_RS: &str = include_str!("../../templates/basic/src/main.rs");
     pub const BUILD_SH: &str = include_str!("../../templates/basic/build.sh");
-    pub const GITIGNORE: &str = include_str!("../../templates/basic/.gitignore");
+    pub const GITIGNORE: &str = include_str!("../../templates/basic/gitignore.tmpl");
 }
 
 mod contract {
-    pub const CARGO_TOML: &str = include_str!("../../templates/contract/Cargo.toml");
+    pub const CARGO_TOML: &str = include_str!("../../templates/contract/Cargo.toml.tmpl");
     pub const MAIN_RS: &str = include_str!("../../templates/contract/src/main.rs");
     pub const BUILD_SH: &str = include_str!("../../templates/contract/build.sh");
-    pub const GITIGNORE: &str = include_str!("../../templates/contract/.gitignore");
+    pub const GITIGNORE: &str = include_str!("../../templates/contract/gitignore.tmpl");
 }
 
 mod shared {
