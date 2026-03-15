@@ -11,16 +11,27 @@ outlayer run alice.near/my-agent '{"command": "hello"}'     # Execute agent
 
 ## Install
 
-### From source (requires [Rust](https://rustup.rs))
+### Quick install (macOS / Linux)
 
 ```bash
-# From GitHub
-cargo install --git https://github.com/out-layer/outlayer-cli
-
-# From local checkout
-cd outlayer-cli
-cargo install --path .
+curl -fsSL https://raw.githubusercontent.com/out-layer/outlayer-cli/main/install.sh | sh
 ```
+
+### From crates.io (requires [Rust](https://rustup.rs))
+
+```bash
+cargo install outlayer-cli
+```
+
+### From GitHub source
+
+```bash
+cargo install --git https://github.com/out-layer/outlayer-cli
+```
+
+### GitHub Releases
+
+Pre-built binaries for macOS (ARM/x86), Linux (x86/ARM), and Windows are available on the [Releases](https://github.com/out-layer/outlayer-cli/releases) page.
 
 ## Quick Start
 

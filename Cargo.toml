@@ -3,6 +3,12 @@ name = "outlayer-cli"
 version = "0.1.0"
 edition = "2021"
 description = "CLI for deploying, running, and managing OutLayer agents"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/out-layer/outlayer-cli"
+homepage = "https://outlayer.ai"
+keywords = ["near", "outlayer", "agents", "cli", "wasm"]
+categories = ["command-line-utilities"]
+readme = "README.md"
 
 [lib]
 name = "outlayer_cli"
