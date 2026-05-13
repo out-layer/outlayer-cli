@@ -169,9 +169,20 @@ pub async fn upload(
         upload_via_near_key(network, &creds, &receiver_id, &payloads).await?;
     }
 
+    // FastFS host is per-network: testnet uses `test.fastfs.io`,
+    // mainnet uses `main.fastfs.io`. Otherwise the CDN can't find
+    // the receipt because it only indexes one network per host.
+    let fastfs_host = match network.network_id.as_str() {
+        "mainnet" => "main.fastfs.io",
+        "testnet" => "test.fastfs.io",
+        other => anyhow::bail!(
+            "unknown network '{}' — FastFS only knows mainnet/testnet",
+            other
+        ),
+    };
     let fastfs_url = format!(
-        "https://main.fastfs.io/{}/{}/{}",
-        creds.account_id, receiver_id, relative_path
+        "https://{}/{}/{}/{}",
+        fastfs_host, creds.account_id, receiver_id, relative_path
     );
 
     eprintln!();

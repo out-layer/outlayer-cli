@@ -2,6 +2,11 @@
 name = "outlayer-cli"
 version = "0.1.0"
 edition = "2021"
+# near-primitives 0.29 / cargo_metadata 0.21 pulled in by the
+# near-jsonrpc-client 0.16 bump require rustc 1.86+. Cargo refuses
+# the build with an older toolchain instead of emitting a confusing
+# transitive error from one of the dependencies.
+rust-version = "1.86"
 description = "CLI for deploying, running, and managing OutLayer agents"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/out-layer/outlayer-cli"
@@ -9,7 +14,7 @@ homepage = "https://outlayer.ai"
 keywords = ["near", "outlayer", "agents", "cli", "wasm"]
 categories = ["command-line-utilities"]
 readme = "README.md"
-include = ["src/**/*", "templates/**/*", "Cargo.toml", "README.md", "LICENSE*"]
+include = ["src/**/*", "templates/**/*", "res/**/*", "Cargo.toml", "README.md", "LICENSE*"]
 
 [lib]
 name = "outlayer_cli"
@@ -30,10 +35,14 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
 
 # NEAR
-near-jsonrpc-client = "0.13"
-near-primitives = "0.26"
-near-crypto = "0.26"
-near-jsonrpc-primitives = "0.26"
+# Bumped 0.26 → 0.29 to get the `UseGlobalContract` action variant
+# (NEP-591). Vault deploy uses it instead of inline DeployContract so
+# the tx payload is a hash, not 150 KB of WASM. jsonrpc-client 0.16
+# is the matching pair (`>0.22,<0.30`).
+near-jsonrpc-client = "0.16"
+near-primitives = "0.29"
+near-crypto = "0.29"
+near-jsonrpc-primitives = "0.29"
 
 # Crypto
 chacha20poly1305 = "0.10"
@@ -42,6 +51,15 @@ hex = "0.4"
 sha2 = "0.10"
 base64 = "0.22"
 borsh = "1"
+# ECIES v1 (X25519 ECDH + HKDF + ChaCha20-Poly1305) — matches the
+# dashboard's `lib/ecies.ts` and is the format keystore-worker
+# `decrypt_ecies` consumes via `derive_x25519_keypair`. Legacy
+# ChaCha20-with-pubkey-as-symmetric-key path is broken for
+# vault-bound secrets (keystore's `decrypt_legacy` derives Ed25519
+# verifying_key, CLI used X25519 pubkey → different bytes), so we
+# migrate the CLI to ECIES too.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
 
 # OS keychain
 keyring = "3"

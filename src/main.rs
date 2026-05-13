@@ -188,6 +188,11 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: i64,
     },
+    /// Manage per-customer sovereign vaults
+    Vault {
+        #[command(subcommand)]
+        command: VaultCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -249,6 +254,13 @@ enum SecretsCommands {
         /// Access control: allow-all (default), whitelist:acc1,acc2
         #[arg(long, default_value = "allow-all")]
         access: String,
+
+        /// Bind the secret to a per-customer vault account. The
+        /// keystore decrypts via the per-vault master derived from
+        /// MPC for that vault. Without this flag, the legacy
+        /// default-master path is used.
+        #[arg(long)]
+        vault_id: Option<String>,
     },
     /// Update secrets (preserves PROTECTED_*, merges with existing)
     Update {
@@ -399,6 +411,85 @@ enum ChecksCommands {
         /// Base64-encoded 32-byte nonce (auto-generated if omitted)
         #[arg(long)]
         nonce: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum VaultCommands {
+    /// Resume an interrupted `vault init` — runs sign-verification + customer/register
+    /// idempotently against an already-deployed vault account.
+    Resume {
+        /// Vault account ID (e.g. vault.alice.near)
+        account: String,
+    },
+    /// Atomically deploy a new vault on a sub-account, verify, and register
+    Init {
+        /// Sub-account name (vault is deployed at `<name>.<parent>`)
+        #[arg(long, default_value = "vault")]
+        name: String,
+
+        /// Parent account (defaults to logged-in user)
+        #[arg(long)]
+        parent: Option<String>,
+
+        /// Unilateral exit window: '24h', '7d', '30d' (default: 24h)
+        #[arg(long, default_value = "24h")]
+        exit_window: String,
+
+        /// Optional HTTPS URL to receive vault event webhooks
+        /// (vault_registered, vault_verified, recovery_*, etc.).
+        /// Stored on the coordinator at registration time. Same
+        /// validation as other webhook endpoints — HTTPS only,
+        /// no localhost / private IPs.
+        #[arg(long)]
+        webhook_url: Option<String>,
+    },
+    /// Display vault state (parent, exit window, recovery, registered TEE keys)
+    Status {
+        /// Vault account ID (e.g. vault.alice.near)
+        account: String,
+    },
+    /// Verify a vault — view-call `is_vault_verified` and run defense-in-depth checks
+    Verify {
+        /// Vault account ID
+        account: String,
+    },
+    /// Initiate cessation-triggered recovery (requires DAO `is_ceased == true`)
+    InitiateRecovery {
+        /// Vault account ID
+        account: String,
+    },
+    /// Initiate parent-only unilateral recovery (no DAO involvement; uses configured exit window)
+    InitiateUnilateralRecovery {
+        /// Vault account ID
+        account: String,
+    },
+    /// Finalize an in-flight recovery (works for both cessation and unilateral)
+    /// and atomically install your locally-generated key on the vault.
+    FinalizeRecovery {
+        /// Vault account ID
+        account: String,
+        /// Your locally-generated NEAR public key (`ed25519:<base58>`).
+        /// On success it becomes the only full-access key on the
+        /// vault; all OutLayer-side TEE keys are deleted atomically.
+        new_parent_pubkey: String,
+    },
+    /// Update the unilateral exit window (parent only; affects only future recoveries)
+    SetExitWindow {
+        /// Vault account ID
+        account: String,
+        /// New window: '24h', '7d', '30d'
+        window: String,
+    },
+    /// After a successful recovery, parent adds a key to the vault
+    UnlockedAddKey {
+        /// Vault account ID
+        account: String,
+        /// Public key to add (ed25519:...)
+        pubkey: String,
+        /// Add as full-access key (default: function-call key with 1 NEAR allowance)
+        #[arg(long)]
+        full_access: bool,
     },
 }
 
@@ -575,6 +666,7 @@ async fn main() -> anyhow::Result<()> {
                     wasm_hash,
                     generate,
                     access,
+                    vault_id,
                 } => {
                     commands::secrets::set(
                         &network,
@@ -587,6 +679,7 @@ async fn main() -> anyhow::Result<()> {
                         wasm_hash,
                         generate,
                         &access,
+                        vault_id,
                     )
                     .await?
                 }
@@ -688,6 +781,55 @@ async fn main() -> anyhow::Result<()> {
                 project_config.as_ref().and_then(|c| c.network.as_deref()),
             )?;
             commands::logs::logs(&network, project_config.as_ref(), nonce, limit).await?;
+        }
+        Commands::Vault { command } => {
+            let network = resolve_with_project(env_net)?;
+            match command {
+                VaultCommands::Init {
+                    name,
+                    parent,
+                    exit_window,
+                    webhook_url,
+                } => {
+                    commands::vault::init(
+                        &network,
+                        &name,
+                        parent,
+                        &exit_window,
+                        webhook_url.as_deref(),
+                    )
+                    .await?
+                }
+                VaultCommands::Resume { account } => {
+                    commands::vault::resume(&network, &account).await?
+                }
+                VaultCommands::Status { account } => {
+                    commands::vault::status(&network, &account).await?
+                }
+                VaultCommands::Verify { account } => {
+                    commands::vault::verify(&network, &account).await?
+                }
+                VaultCommands::InitiateRecovery { account } => {
+                    commands::vault::initiate_recovery(&network, &account).await?
+                }
+                VaultCommands::InitiateUnilateralRecovery { account } => {
+                    commands::vault::initiate_unilateral_recovery(&network, &account).await?
+                }
+                VaultCommands::FinalizeRecovery { account, new_parent_pubkey } => {
+                    commands::vault::finalize_recovery(&network, &account, &new_parent_pubkey).await?
+                }
+                VaultCommands::SetExitWindow { account, window } => {
+                    commands::vault::set_exit_window(&network, &account, &window).await?
+                }
+                VaultCommands::UnlockedAddKey {
+                    account,
+                    pubkey,
+                    full_access,
+                } => {
+                    commands::vault::unlocked_add_key(&network, &account, &pubkey, full_access)
+                        .await?
+                }
+            }
         }
     }
 

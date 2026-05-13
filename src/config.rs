@@ -86,6 +86,14 @@ pub struct NetworkConfig {
     #[allow(dead_code)]
     pub wallet_url: String,
     pub api_base_url: String,
+    /// keystore-DAO contract — used by vault contract for `is_ceased` /
+    /// `is_keystore_approved` and read by `outlayer vault verify` for
+    /// `is_vault_verified` / `is_vault_code_approved`.
+    pub keystore_dao_id: String,
+    /// MPC signer contract that the vault's TEE function-call key is
+    /// allowed to call (`request_app_private_key` only). Burned into the
+    /// vault contract at deploy time.
+    pub mpc_contract_id: String,
 }
 
 impl NetworkConfig {
@@ -96,6 +104,11 @@ impl NetworkConfig {
             contract_id: "outlayer.near".to_string(),
             wallet_url: "https://app.mynearwallet.com".to_string(),
             api_base_url: "https://api.outlayer.fastnear.com".to_string(),
+            // Production deploy uses `dao.outlayer.near` per docker
+            // .env.mainnet-keystore-phala. The keystore worker's
+            // KEYSTORE_DAO_CONTRACT is the canonical source.
+            keystore_dao_id: "dao.outlayer.near".to_string(),
+            mpc_contract_id: "v1.signer".to_string(),
         }
     }
 
@@ -106,6 +119,8 @@ impl NetworkConfig {
             contract_id: "outlayer.testnet".to_string(),
             wallet_url: "https://testnet.mynearwallet.com".to_string(),
             api_base_url: "https://testnet-api.outlayer.fastnear.com".to_string(),
+            keystore_dao_id: "dao.outlayer.testnet".to_string(),
+            mpc_contract_id: "v1.signer-prod.testnet".to_string(),
         }
     }
 }

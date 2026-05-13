@@ -11,4 +11,5 @@ pub mod run;
 pub mod secrets;
 pub mod status;
 pub mod upload;
+pub mod vault;
 pub mod versions;

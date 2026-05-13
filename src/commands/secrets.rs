@@ -122,7 +122,7 @@ fn parse_secrets_json(json_str: &str) -> Result<serde_json::Map<String, Value>> 
 
 // ── Set ──────────────────────────────────────────────────────────────
 
-/// `outlayer secrets set '{"KEY":"val"}' [--generate PROTECTED_X:type] [--access ...]`
+/// `outlayer secrets set '{"KEY":"val"}' [--generate PROTECTED_X:type] [--access ...] [--vault-id ...]`
 #[allow(clippy::too_many_arguments)]
 pub async fn set(
     network: &NetworkConfig,
@@ -135,6 +135,7 @@ pub async fn set(
     wasm_hash: Option<String>,
     generate: Vec<String>,
     access_str: &str,
+    vault_id: Option<String>,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
 
@@ -159,12 +160,15 @@ pub async fn set(
 
         eprintln!("Encrypting secrets...");
         let pubkey = api
-            .get_secrets_pubkey(&GetPubkeyRequest {
-                accessor: accessor.coordinator.clone(),
-                owner: creds.account_id.clone(),
-                profile: Some(profile.to_string()),
-                secrets_json: secrets_str.clone(),
-            })
+            .get_secrets_pubkey(
+                &GetPubkeyRequest {
+                    accessor: accessor.coordinator.clone(),
+                    owner: creds.account_id.clone(),
+                    profile: Some(profile.to_string()),
+                    secrets_json: secrets_str.clone(),
+                },
+                vault_id.as_deref(),
+            )
             .await
             .context("Failed to get keystore pubkey")?;
 
@@ -176,12 +180,15 @@ pub async fn set(
 
             eprintln!("Encrypting manual secrets...");
             let pubkey = api
-                .get_secrets_pubkey(&GetPubkeyRequest {
-                    accessor: accessor.coordinator.clone(),
-                    owner: creds.account_id.clone(),
-                    profile: Some(profile.to_string()),
-                    secrets_json: secrets_str.clone(),
-                })
+                .get_secrets_pubkey(
+                    &GetPubkeyRequest {
+                        accessor: accessor.coordinator.clone(),
+                        owner: creds.account_id.clone(),
+                        profile: Some(profile.to_string()),
+                        secrets_json: secrets_str.clone(),
+                    },
+                    vault_id.as_deref(),
+                )
                 .await?;
 
             Some(crypto::encrypt_secrets(&pubkey, &secrets_str)?)
@@ -222,6 +229,12 @@ pub async fn set(
                 "profile": profile,
                 "encrypted_secrets_base64": encrypted_data,
                 "access": access,
+                // `--vault-id <vault.account>` binds the secret to a
+                // per-customer vault: the keystore decrypts it via
+                // the per-vault master derived from MPC CKD using
+                // that vault's predecessor. Without --vault-id,
+                // legacy default-master decryption applies.
+                "vault_id": vault_id,
             }),
             gas,
             deposit,
@@ -370,6 +383,11 @@ pub async fn update(
                 "profile": profile,
                 "encrypted_secrets_base64": response.encrypted_secrets_base64,
                 "access": "AllowAll",
+                // Re-store flow preserves the existing vault binding
+                // (`null` = no-op on the side-table per
+                // the contract's documented semantics, see
+                // contract/src/secrets.rs `store_secrets`).
+                "vault_id": null,
             }),
             gas,
             deposit,

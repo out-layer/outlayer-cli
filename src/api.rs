@@ -279,14 +279,28 @@ impl ApiClient {
             .context("Failed to parse update_user_secrets response")
     }
 
-    /// POST /secrets/pubkey — get keystore pubkey for encryption
-    pub async fn get_secrets_pubkey(&self, request: &GetPubkeyRequest) -> Result<String> {
+    /// POST /secrets/pubkey — get keystore pubkey for encryption.
+    ///
+    /// `vault_id`, when set, MUST be forwarded to the keystore as
+    /// `X-Customer-Vault` so the returned pubkey is derived from the
+    /// per-vault master (not the operator default master). Skipping
+    /// it produces silent corruption: ciphertext encrypted with the
+    /// default-master pubkey is later stored on chain with
+    /// `vault_id: ...` binding, the worker derives the vault master
+    /// for decrypt, the bytes don't decrypt, the env var is never
+    /// injected and the agent reports the secret as missing.
+    pub async fn get_secrets_pubkey(
+        &self,
+        request: &GetPubkeyRequest,
+        vault_id: Option<&str>,
+    ) -> Result<String> {
         let url = format!("{}/secrets/pubkey", self.base_url);
 
-        let response = self
-            .client
-            .post(&url)
-            .json(request)
+        let mut req = self.client.post(&url).json(request);
+        if let Some(vid) = vault_id {
+            req = req.header("X-Customer-Vault", vid);
+        }
+        let response = req
             .send()
             .await
             .context("Failed to get secrets pubkey")?;
@@ -672,6 +686,69 @@ impl ApiClient {
             .await
             .context("Failed to parse peek response")
     }
+
+    // ── Vault init helpers ─────────────────────────────────────────────
+
+    /// `POST /customer/derive-tee-key` — fetch the deterministic TEE
+    /// public key the customer must install on their vault during the
+    /// atomic deploy. No auth (IP-rate-limited on the coordinator).
+    pub async fn derive_vault_tee_key(&self, vault_account_id: &str) -> Result<String> {
+        let url = format!("{}/customer/derive-tee-key", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({ "vault_account_id": vault_account_id }))
+            .send()
+            .await
+            .context("Failed to call /customer/derive-tee-key")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("derive-tee-key failed ({status}): {text}");
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            public_key: String,
+        }
+        let resp: Resp = response
+            .json()
+            .await
+            .context("Failed to parse derive-tee-key response")?;
+        Ok(resp.public_key)
+    }
+
+    /// `POST /customer/sign-verification` — drive
+    /// `/sign-vault-verification` on the keystore. Idempotent;
+    /// short-circuits if `is_vault_verified == true` already.
+    pub async fn sign_vault_verification(
+        &self,
+        vault_account_id: &str,
+    ) -> Result<SignVerificationResponse> {
+        let url = format!("{}/customer/sign-verification", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({ "vault_account_id": vault_account_id }))
+            .send()
+            .await
+            .context("Failed to call /customer/sign-verification")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("sign-verification failed ({status}): {text}");
+        }
+        response
+            .json()
+            .await
+            .context("Failed to parse sign-verification response")
+    }
+
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SignVerificationResponse {
+    pub tx_hash: Option<String>,
+    pub already_verified: bool,
 }
 
 // ── Response Types ─────────────────────────────────────────────────────

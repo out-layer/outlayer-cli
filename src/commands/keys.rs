@@ -36,12 +36,17 @@ pub async fn create(network: &NetworkConfig) -> Result<()> {
 
     // Get pubkey for encryption
     let pubkey = api
-        .get_secrets_pubkey(&GetPubkeyRequest {
-            accessor: json!({ "type": "System", "PaymentKey": {} }),
-            owner: creds.account_id.clone(),
-            profile: Some(nonce.to_string()),
-            secrets_json: secrets_json.clone(),
-        })
+        .get_secrets_pubkey(
+            &GetPubkeyRequest {
+                accessor: json!({ "type": "System", "PaymentKey": {} }),
+                owner: creds.account_id.clone(),
+                profile: Some(nonce.to_string()),
+                secrets_json: secrets_json.clone(),
+            },
+            // Payment keys are owner-scoped, never vault-bound — the
+            // System(PaymentKey) accessor doesn't take a vault_id.
+            None,
+        )
         .await
         .context("Failed to get keystore pubkey")?;
 
@@ -59,7 +64,10 @@ pub async fn create(network: &NetworkConfig) -> Result<()> {
                 "accessor": { "System": "PaymentKey" },
                 "profile": nonce.to_string(),
                 "encrypted_secrets_base64": encrypted,
-                "access": "AllowAll"
+                "access": "AllowAll",
+                // Payment keys stay on the OutLayer default master
+                // (operational data, not custody).
+                "vault_id": null,
             }),
             gas,
             deposit,
