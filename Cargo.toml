@@ -42,6 +42,10 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.11", features = ["json", "rustls-tls", "blocking"], default-features = false }
 
 # NEAR
+# Bumped 0.26 → 0.29 to get the `UseGlobalContract` action variant
+# (NEP-591). Vault deploy uses it instead of inline DeployContract so
+# the tx payload is a hash, not 150 KB of WASM. jsonrpc-client 0.16
+# is the matching pair (`>0.22,<0.30`).
 near-jsonrpc-client = "0.16"
 near-primitives = "0.29"
 near-crypto = "0.29"
@@ -54,6 +58,13 @@ hex = "0.4"
 sha2 = "0.10"
 base64 = "0.22"
 borsh = "1"
+# ECIES v1 (X25519 ECDH + HKDF + ChaCha20-Poly1305) — matches the
+# dashboard's `lib/ecies.ts` and is the format keystore-worker
+# `decrypt_ecies` consumes via `derive_x25519_keypair`. Legacy
+# ChaCha20-with-pubkey-as-symmetric-key path is broken for
+# vault-bound secrets (keystore's `decrypt_legacy` derives Ed25519
+# verifying_key, CLI used X25519 pubkey → different bytes), so we
+# migrate the CLI to ECIES too.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 
