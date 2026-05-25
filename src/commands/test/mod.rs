@@ -46,8 +46,8 @@ pub struct TestArgs {
     #[arg(long)]
     pub rpc: bool,
 
-    /// NEAR RPC URL (default: testnet)
-    #[arg(long, default_value = "https://rpc.testnet.near.org")]
+    /// NEAR RPC URL (default: fastnear testnet)
+    #[arg(long, default_value = "https://rpc.testnet.fastnear.com")]
     pub rpc_url: String,
 
     /// Maximum RPC calls per execution
