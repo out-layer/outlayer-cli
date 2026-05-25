@@ -24,6 +24,13 @@ path = "src/lib.rs"
 name = "outlayer"
 path = "src/main.rs"
 
+[features]
+default = []
+test-runner = ["wasmtime", "wasmtime-wasi", "wasmtime-wasi-http", "reqwest/blocking"]
+
+[package.metadata.docs.rs]
+features = ["test-runner"]
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -78,6 +85,11 @@ anyhow = "1"
 # Utils
 dirs = "5"
 bs58 = "0.5.1"
+
+# Test runner (optional, enabled by --features test-runner)
+wasmtime = { version = "28", features = ["component-model", "async"], optional = true }
+wasmtime-wasi = { version = "28", optional = true }
+wasmtime-wasi-http = { version = "28", optional = true }
 
 [dev-dependencies]
 serial_test = "3"

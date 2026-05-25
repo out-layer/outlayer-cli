@@ -13,3 +13,6 @@ pub mod status;
 pub mod upload;
 pub mod vault;
 pub mod versions;
+
+#[cfg(feature = "test-runner")]
+pub mod test;

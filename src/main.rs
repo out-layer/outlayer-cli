@@ -193,6 +193,12 @@ enum Commands {
         #[command(subcommand)]
         command: VaultCommands,
     },
+    /// Test WASM module for OutLayer compatibility (requires test-runner feature)
+    #[cfg(feature = "test-runner")]
+    Test {
+        #[command(flatten)]
+        args: outlayer_cli::commands::test::TestArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -830,6 +836,10 @@ async fn main() -> anyhow::Result<()> {
                         .await?
                 }
             }
+        }
+        #[cfg(feature = "test-runner")]
+        Commands::Test { args } => {
+            commands::test::run(&args).await?
         }
     }
 
