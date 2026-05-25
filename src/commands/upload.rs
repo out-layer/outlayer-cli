@@ -80,7 +80,7 @@ fn encode_partial(
 }
 
 /// Prepare FastFS payloads for a file (simple for ≤1MB, chunked for >1MB).
-fn prepare_fastfs_payloads(relative_path: &str, mime_type: &str, content: &[u8]) -> Vec<Vec<u8>> {
+pub fn prepare_fastfs_payloads(relative_path: &str, mime_type: &str, content: &[u8]) -> Vec<Vec<u8>> {
     if content.len() <= CHUNK_SIZE {
         return vec![encode_simple(relative_path, mime_type, content)];
     }
@@ -203,7 +203,7 @@ pub async fn upload(
 }
 
 /// Upload via direct NEAR transaction (private key auth).
-async fn upload_via_near_key(
+pub async fn upload_via_near_key(
     network: &NetworkConfig,
     creds: &config::Credentials,
     receiver_id: &str,
@@ -244,7 +244,7 @@ async fn upload_via_near_key(
 }
 
 /// Upload via wallet API (wallet_key auth) — sends Borsh args as base64.
-async fn upload_via_wallet(
+pub async fn upload_via_wallet(
     network: &NetworkConfig,
     creds: &config::Credentials,
     receiver_id: &str,

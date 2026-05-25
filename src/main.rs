@@ -11,7 +11,7 @@ struct Cli {
     verbose: bool,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -71,12 +71,13 @@ enum Commands {
     },
     /// Execute agent
     Run {
-        /// Project to run (owner/name, e.g. alice.near/my-agent)
-        #[arg(required_unless_present_any = ["github", "wasm"])]
+        /// Project to run (owner/name, e.g. alice.near/my-agent). Auto-detected from outlayer.toml
+        #[arg(long)]
         project: Option<String>,
 
-        /// JSON input
-        input: Option<String>,
+        /// JSON input (e.g. '{"key":"value"}')
+        #[arg(default_value = "{}")]
+        input: String,
 
         /// Run from GitHub repo (url or owner/repo)
         #[arg(long)]
@@ -508,43 +509,123 @@ async fn main() -> anyhow::Result<()> {
     let env_net = env_net.as_deref();
 
     match cli.command {
-        Commands::About => {
+        // ── Bare `outlayer` with no subcommand ────────────────────────
+        None => {
+            // Smart default: if in a project dir, deploy. Otherwise, guide.
+            match config::load_project_config() {
+                Ok(project_config) => {
+                    let network = config::resolve_network(
+                        env_net,
+                        project_config.network.as_deref(),
+                    )?;
+                    let target = project_config.build.as_ref()
+                        .map(|b| b.target.as_str())
+                        .unwrap_or("wasm32-wasip2");
+                    let name = &project_config.project.name;
+                    eprintln!(
+                        "  \x1b[1m{}\x1b[0m  Deploying \x1b[36m{}\x1b[0m...",
+                        "⟠", name
+                    );
+                    commands::deploy::deploy(
+                        &network, name, None, None, target, false,
+                    ).await?;
+                }
+                Err(_) => {
+                    // No project — interactive prompt
+                    use std::io::{self, Write};
+                    
+                    eprintln!();
+                    eprintln!("  \x1b[1m⟠\x1b[0m  No \x1b[36moutlayer.toml\x1b[0m found in this directory.");
+                    eprintln!();
+                    eprintln!("  What would you like to do?");
+                    eprintln!("    \x1b[36m1\x1b[0m) Create a new project");
+                    eprintln!("    \x1b[36m2\x1b[0m) Login");
+                    eprintln!("    \x1b[36mq\x1b[0m) Quit");
+                    eprintln!();
+                    eprint!("  > ");
+                    io::stderr().flush()?;
+
+                    let mut choice = String::new();
+                    io::stdin().read_line(&mut choice)?;
+                    let choice = choice.trim();
+
+                    match choice {
+                        "1" => {
+                            eprintln!();
+                            eprint!("  Project name: ");
+                            io::stdout().flush()?;
+                            let mut name = String::new();
+                            io::stdin().read_line(&mut name)?;
+                            let name = name.trim();
+
+                            if name.is_empty() {
+                                anyhow::bail!("Project name cannot be empty");
+                            }
+
+                            eprint!("  Template (\x1b[36mbasic\x1b[0m/contract): ");
+                            io::stdout().flush()?;
+                            let mut template = String::new();
+                            io::stdin().read_line(&mut template)?;
+                            let template = template.trim();
+                            let template = if template.is_empty() { "basic" } else { template };
+
+                            let network = config::resolve_network(env_net, None)?;
+                            commands::create::create(&network, name, template, None).await?;
+
+                            eprintln!();
+                            eprintln!("  \x1b[32mNext:\x1b[0m");
+                            eprintln!("    \x1b[33mcd {name}\x1b[0m");
+                            eprintln!("    \x1b[33moutlayer\x1b[0m  # build, upload, deploy");
+                            eprintln!();
+                        }
+                        "2" => {
+                            let network = config::resolve_network(env_net, None)?;
+                            commands::auth::login(&network.network_id).await?;
+                        }
+                        _ => {
+                            eprintln!();
+                        }
+                    }
+                }
+            }
+        }
+        Some(Commands::About) => {
             commands::about::about();
         }
-        Commands::Login { network, wallet_key } => {
+        Some(Commands::Login { network, wallet_key }) => {
             if let Some(wk) = wallet_key {
                 commands::auth::login_wallet_key(&network, &wk).await?;
             } else {
                 commands::auth::login(&network).await?;
             }
         }
-        Commands::Logout => {
+        Some(Commands::Logout) => {
             let network = config::resolve_network(env_net, None)?;
             commands::auth::logout(&network)?;
         }
-        Commands::Whoami => {
+        Some(Commands::Whoami) => {
             let network = config::resolve_network(env_net, None)?;
             commands::auth::whoami(&network)?;
         }
-        Commands::Create { name, template, dir } => {
+        Some(Commands::Create { name, template, dir }) => {
             let network = config::resolve_network(env_net, None)?;
             commands::create::create(&network, &name, &template, dir).await?;
         }
-        Commands::Deploy {
+        Some(Commands::Deploy {
             name,
             wasm_url,
             hash,
             github,
             target,
             no_activate,
-        } => {
+        }) => {
             let network = resolve_with_project(env_net)?;
             // --github forces GitHub mode (ignores wasm_url)
             let wasm_url = if github { None } else { wasm_url };
             commands::deploy::deploy(&network, &name, wasm_url, hash, &target, no_activate)
                 .await?;
         }
-        Commands::Run {
+        Some(Commands::Run {
             project,
             input,
             github,
@@ -559,15 +640,29 @@ async fn main() -> anyhow::Result<()> {
             target,
             secrets_profile,
             secrets_account,
-        } => {
-            let network = resolve_with_project(env_net)?;
+        }) => {
+            let project_config = config::load_project_config().ok();
+            let network = config::resolve_network(
+                env_net,
+                project_config.as_ref().and_then(|c| c.network.as_deref()),
+            )?;
             let source = if let Some(repo) = github {
                 commands::run::RunSource::GitHub { repo, commit }
             } else if let Some(url) = wasm {
                 commands::run::RunSource::WasmUrl { url, hash }
             } else {
+                // Auto-resolve project from outlayer.toml if not provided
+                let project_id = match project {
+                    Some(p) => p,
+                    None => match &project_config {
+                        Some(cfg) => format!("{}/{}", cfg.project.owner, cfg.project.name),
+                        None => anyhow::bail!(
+                            "No project specified. Run from a directory with outlayer.toml, or use:\n  outlayer run --project owner/name '{{}}'\n  outlayer run --github user/repo\n  outlayer run --wasm <url>"
+                        ),
+                    },
+                };
                 commands::run::RunSource::Project {
-                    project_id: project.unwrap(),
+                    project_id,
                     version,
                 }
             };
@@ -579,12 +674,12 @@ async fn main() -> anyhow::Result<()> {
                 _ => anyhow::bail!("--secrets-profile and --secrets-account must be used together"),
             };
             commands::run::run(
-                &network, source, input, input_file, is_async, deposit, compute_limit,
+                &network, source, Some(input), input_file, is_async, deposit, compute_limit,
                 &target, secrets_ref,
             )
             .await?;
         }
-        Commands::Keys { command } => {
+        Some(Commands::Keys { command }) => {
             let network = resolve_with_project(env_net)?;
             match command {
                 KeysCommands::Create => commands::keys::create(&network).await?,
@@ -600,7 +695,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Checks { command, api_key } => {
+        Some(Commands::Checks { command, api_key }) => {
             let network = resolve_with_project(env_net)?;
             let api_key_ref = api_key.as_deref();
             match command {
@@ -656,7 +751,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Secrets { command } => {
+        Some(Commands::Secrets { command }) => {
             let project_config = config::load_project_config().ok();
             let network = config::resolve_network(
                 env_net,
@@ -732,7 +827,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Earnings { command } => {
+        Some(Commands::Earnings { command }) => {
             let network = resolve_with_project(env_net)?;
             match command {
                 None => commands::earnings::show(&network).await?,
@@ -744,7 +839,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Status { call_id } => {
+        Some(Commands::Status { call_id }) => {
             let project_config = config::load_project_config()?;
             let network = config::resolve_network(
                 env_net,
@@ -752,7 +847,7 @@ async fn main() -> anyhow::Result<()> {
             )?;
             commands::status::status(&network, &project_config, call_id).await?;
         }
-        Commands::Versions { command } => {
+        Some(Commands::Versions { command }) => {
             let project_config = config::load_project_config()?;
             let network = config::resolve_network(
                 env_net,
@@ -768,19 +863,19 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Upload {
+        Some(Commands::Upload {
             file,
             receiver,
             mime_type,
-        } => {
+        }) => {
             let network = resolve_with_project(env_net)?;
             commands::upload::upload(&network, &file, receiver, mime_type).await?;
         }
-        Commands::Projects { account } => {
+        Some(Commands::Projects { account }) => {
             let network = resolve_with_project(env_net)?;
             commands::projects::list(&network, account).await?;
         }
-        Commands::Logs { nonce, limit } => {
+        Some(Commands::Logs { nonce, limit }) => {
             let project_config = config::load_project_config().ok();
             let network = config::resolve_network(
                 env_net,
@@ -788,7 +883,7 @@ async fn main() -> anyhow::Result<()> {
             )?;
             commands::logs::logs(&network, project_config.as_ref(), nonce, limit).await?;
         }
-        Commands::Vault { command } => {
+        Some(Commands::Vault { command }) => {
             let network = resolve_with_project(env_net)?;
             match command {
                 VaultCommands::Init {
@@ -838,7 +933,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         #[cfg(feature = "test-runner")]
-        Commands::Test { args } => {
+        Some(Commands::Test { args }) => {
             commands::test::run(&args).await?
         }
     }
