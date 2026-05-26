@@ -154,7 +154,7 @@ enum Commands {
     },
     /// Upload file to FastFS (on-chain storage via NEAR transactions)
     Upload {
-        /// File to upload
+        /// File or directory to upload
         file: String,
 
         /// Receiver account (defaults to OutLayer contract)
@@ -164,6 +164,10 @@ enum Commands {
         /// MIME type (auto-detected from extension if omitted)
         #[arg(long)]
         mime_type: Option<String>,
+
+        /// Upload as webapp: uploads directory recursively, rewrites asset URLs in HTML to FastFS URLs
+        #[arg(long)]
+        webapp: bool,
     },
     /// List projects for a user
     Projects {
@@ -867,9 +871,14 @@ async fn main() -> anyhow::Result<()> {
             file,
             receiver,
             mime_type,
+            webapp,
         }) => {
             let network = resolve_with_project(env_net)?;
-            commands::upload::upload(&network, &file, receiver, mime_type).await?;
+            if webapp {
+                commands::upload::upload_webapp(&network, &file, receiver).await?;
+            } else {
+                commands::upload::upload(&network, &file, receiver, mime_type).await?;
+            }
         }
         Some(Commands::Projects { account }) => {
             let network = resolve_with_project(env_net)?;
