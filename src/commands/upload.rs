@@ -276,10 +276,19 @@ async fn upload_via_wallet(
             .await
             .with_context(|| format!("Failed to upload chunk {}/{}", i + 1, num_chunks))?;
 
-        if let Some(tx_hash) = &resp.tx_hash {
-            eprintln!("tx: {tx_hash}");
-        } else {
-            eprintln!("request: {}", resp.request_id);
+        // FastFS calls revert by design (gas=1): the indexer reads the data
+        // from the tx arguments, so status "failed" WITH a tx_hash means the
+        // chunk is recorded on-chain. "failed" without a tx_hash means the tx
+        // never reached the chain — that is a real error.
+        match (&resp.tx_hash, resp.status.as_str()) {
+            (Some(tx_hash), _) => eprintln!("tx: {tx_hash}"),
+            (None, "failed") => anyhow::bail!(
+                "chunk {}/{} failed without reaching the chain: {:?}",
+                i + 1,
+                num_chunks,
+                resp.result
+            ),
+            (None, _) => eprintln!("request: {}", resp.request_id),
         }
     }
 

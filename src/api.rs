@@ -614,7 +614,13 @@ impl ApiClient {
             .context("Failed to parse wallet call response")
     }
 
-    /// POST /wallet/v1/call with raw (Borsh) args as base64
+    /// POST /wallet/v1/call with raw (Borsh) args as base64.
+    ///
+    /// An `onchain_tx_failed` error (HTTP 422) means the tx was broadcast and
+    /// is on chain, but its execution reverted. It is returned as
+    /// `Ok(status: "failed")` with the real `tx_hash` instead of `Err`, so
+    /// callers can decide whether the revert matters (FastFS uploads revert
+    /// by design) and never re-broadcast an already-recorded transaction.
     pub async fn wallet_call_raw(
         &self,
         wallet_key: &str,
@@ -646,16 +652,29 @@ impl ApiClient {
             .await
             .context("Failed to call wallet API")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            if let Ok(err) = serde_json::from_str::<Value>(&text) {
+                if err.get("error").and_then(|v| v.as_str()) == Some("onchain_tx_failed") {
+                    return Ok(WalletCallResponse {
+                        request_id: String::new(),
+                        status: "failed".to_string(),
+                        tx_hash: err
+                            .get("tx_hash")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(String::from),
+                        result: err.get("failure").cloned(),
+                        approval_id: None,
+                    });
+                }
+            }
             anyhow::bail!("Wallet call failed ({status}): {text}");
         }
 
-        response
-            .json()
-            .await
-            .context("Failed to parse wallet call response")
+        serde_json::from_str(&text).context("Failed to parse wallet call response")
     }
 
     /// POST /wallet/v1/payment-check/peek
