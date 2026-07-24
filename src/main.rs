@@ -4,7 +4,7 @@ use outlayer_cli::config;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "outlayer", about = "CLI for deploying, running, and managing OutLayer agents")]
+#[command(name = "outlayer", version, about = "CLI for deploying, running, and managing OutLayer agents")]
 struct Cli {
     /// Verbose output
     #[arg(long, short, global = true)]
