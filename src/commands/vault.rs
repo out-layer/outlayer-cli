@@ -64,18 +64,27 @@ pub enum RecoveryTriggerView {
 /// With NEP-591 `UseGlobalContract` the WASM bytes (~150 KB) live in
 /// the global registry, not on this account. Measured on a fresh
 /// testnet deploy: `storage_usage = 391 bytes` → ~0.004 NEAR storage
-/// stake. Each outbound `request_master → mpc.request_app_private_key`
-/// burns ~0.001 NEAR gas (the deposit is 1 yocto), and the master is
-/// cached in keystore-worker enclave memory after the first call, so
-/// most vaults trigger MPC only a handful of times in their lifetime.
+/// stake.
 ///
-/// 0.1 NEAR ≈ 0.004 storage + ~100 MPC-calls headroom with 10× safety
-/// margin on storage growth (registered_tee_keys, recovery state).
-/// High-frequency derivers can top up; the parent-budget check below
+/// The dominant cost is NOT the gas burn (~0.001 NEAR) but the gas
+/// PREPAYMENT: NEAR makes the vault reserve the full attached gas for
+/// `request_master → mpc.request_app_private_key` up front at a
+/// pessimistic gas price (~0.3 NEAR for the 300 TGas call) and refunds
+/// the unused portion. If the vault can't cover that reservation, the
+/// tx is rejected pre-inclusion with `NotEnoughBalance` and key
+/// derivation fails — sub-agent wallets can't be minted or read.
+///
+/// The master is cached in keystore-worker enclave memory after the
+/// first call, BUT the cache is cleared on every keystore-worker
+/// update/restart, which re-triggers a fresh (gas-prepaying) derive.
+/// So a vault must keep a STANDING balance, not a one-shot amount.
+///
+/// 1 NEAR ≈ 0.004 storage + several cold-derivation prepayments of
+/// headroom before a top-up is needed. The parent-budget check below
 /// prevents getting stuck mid-flow.
 ///
 /// Must match `dashboard/lib/vault.ts::VAULT_INITIAL_YOCTO`.
-const VAULT_INITIAL_NEAR: u128 = 100_000_000_000_000_000_000_000; // 0.1 NEAR (yocto)
+const VAULT_INITIAL_NEAR: u128 = 1_000_000_000_000_000_000_000_000; // 1 NEAR (yocto)
 
 /// Conservative budget for the parent's signing key — must cover the
 /// transfer (`VAULT_INITIAL_NEAR`) plus the deploy tx's gas (~0.05 NEAR
