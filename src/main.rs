@@ -32,6 +32,8 @@ enum Commands {
     Logout,
     /// Show current account
     Whoami,
+    /// Update the outlayer CLI to the latest release
+    Update,
     /// Create a new agent project from template
     Create {
         /// Project name (also used as directory name)
@@ -525,6 +527,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Whoami => {
             let network = config::resolve_network(env_net, None)?;
             commands::auth::whoami(&network)?;
+        }
+        Commands::Update => {
+            // self_update is blocking (reqwest::blocking spins its own
+            // runtime); run it off the async runtime to avoid a nested-runtime
+            // panic. Inner `?` = update result, outer `?` = task join.
+            tokio::task::spawn_blocking(commands::update::run).await??;
         }
         Commands::Create { name, template, dir } => {
             let network = config::resolve_network(env_net, None)?;

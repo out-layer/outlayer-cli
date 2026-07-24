@@ -1,6 +1,6 @@
 [package]
 name = "outlayer-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # near-primitives 0.29 / cargo_metadata 0.21 pulled in by the
 # near-jsonrpc-client 0.16 bump require rustc 1.86+. Cargo refuses
@@ -40,6 +40,11 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP client (0.11 to match near crates)
 reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
+# Self-update (`outlayer update`) — pulls the latest GitHub release asset for
+# the current platform and swaps the running binary. 0.39 shares reqwest 0.11
+# (no duplicate reqwest); rustls to match, tar/zip for the release archives.
+self_update = { version = "0.39", default-features = false, features = ["rustls", "archive-tar", "compression-flate2", "archive-zip", "compression-zip-deflate"] }
 
 # NEAR
 # Bumped 0.26 → 0.29 to get the `UseGlobalContract` action variant
