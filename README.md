@@ -246,6 +246,66 @@ outlayer upload ./target/wasm32-wasip2/release/my-agent.wasm
 | `outlayer logs` | View execution history |
 | `outlayer logs --nonce 2 --limit 50` | Specific key, more entries |
 
+### Test (local WASM validation)
+
+Run a WASM module locally with wasmtime and check it's compatible with NEAR
+OutLayer — correct binary format (WASI P1 or P2), fuel metering, stdin→stdout
+handling, and output size limits — before deploying.
+
+This is an opt-in feature: it pulls in the wasmtime runtime, so it is **not**
+in the default build. Build with the `test-runner` feature:
+
+```bash
+cargo install --git https://github.com/out-layer/outlayer-cli --features test-runner
+# or from a local checkout:
+cargo build --release --features test-runner
+```
+
+```bash
+# build your module (WASI P1 or P2 component both work)
+cargo build --target wasm32-wasip2 --release
+
+# validate it
+outlayer test \
+  --wasm target/wasm32-wasip2/release/echo-ark.wasm \
+  --input '{"message":"hello outlayer","n":42}'
+```
+
+Output:
+
+```
+Detected: WASI Preview 2 Component
+Execution successful!
+
+Results:
+  - Fuel consumed: 8866 instructions
+  - Output size: 67 bytes
+
+Output:
+unknown said "{"message":"hello outlayer","n":42}" at block unknown
+
+All checks passed! Module is compatible with NEAR OutLayer.
+```
+
+> The echo example prints a plain string, so you'll see a
+> `Warning: Output is not valid JSON` — that's expected here. OutLayer
+> contracts normally return JSON; the warning only flags non-JSON output, it
+> does not fail the check.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--wasm <PATH>` | required | Path to the `.wasm` file |
+| `--input <JSON>` | `{}` | Input JSON passed on stdin |
+| `--input-file <PATH>` | - | Read input JSON from a file instead |
+| `--max-instructions <N>` | `10000000000` | Fuel limit |
+| `--max-memory-mb <N>` | `128` | Memory limit |
+| `--env KEY=value` | - | Set an env var (repeatable) |
+| `--verbose` | - | Print the module's stderr |
+
+**Scope:** `outlayer test` validates pure compute and stdin→stdout I/O. It does
+**not** emulate OutLayer host functions (`near:rpc`, `near:storage`, etc.) — by
+design. Modules that call those should be tested on testnet with `outlayer run`.
+
 ## Global Flags
 
 ```bash
