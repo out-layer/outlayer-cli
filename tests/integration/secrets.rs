@@ -35,7 +35,7 @@ async fn test_secrets_lifecycle() {
             owner: ctx.account_id.clone(),
             profile: Some(profile.clone()),
             secrets_json: secrets_json.clone(),
-        })
+        }, None)
         .await
         .expect("get_secrets_pubkey failed");
 

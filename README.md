@@ -112,6 +112,7 @@ outlayer projects bob.near
 | Command | Description |
 |---------|-------------|
 | `outlayer secrets set '{"KEY":"val"}'` | Encrypt and store secrets |
+| `outlayer secrets set-for-agent '{"KEY":"val"}' --project <owner>/<name>` | Leave a secret for an agent to use with one connector |
 | `outlayer secrets update '{"KEY":"val"}'` | Merge with existing (preserves PROTECTED_*) |
 | `outlayer secrets set --generate PROTECTED_X:hex32` | Generate protected secret in TEE |
 | `outlayer secrets list` | List stored secrets (metadata only) |
@@ -145,6 +146,35 @@ outlayer secrets delete --profile production
 ```
 
 Default accessor: `--project` auto-resolved from `outlayer.toml` if present.
+
+#### A secret for an agent
+
+`secrets set` stores a secret for **your own** project. `set-for-agent` stores
+one for a **custody agent** to use with somebody else's connector — the API key
+a connector needs on the agent's behalf. It is sealed to the agent's own key,
+stored on chain under the agent's name, and readable by that agent alone.
+
+```bash
+export OUTLAYER_WALLET_KEY=wk_...   # the agent's wallet key
+
+# The logged-in account pays the storage, so the agent needs no NEAR
+outlayer secrets set-for-agent '{"MAILGUN_KEY":"key-..."}' \
+  --project connectors.outlayer.near/near-email
+
+# Or let the agent's own wallet pay (it needs ~0.11 NEAR)
+outlayer secrets set-for-agent '{"MAILGUN_KEY":"key-..."}' \
+  --project connectors.outlayer.near/near-email --agent-pays
+
+# Refuse unless the secret lands under the vault you expect
+outlayer secrets set-for-agent '{"MAILGUN_KEY":"key-..."}' \
+  --project connectors.outlayer.near/near-email --vault-id vault.alice.near
+```
+
+The plaintext never leaves the machine: the key it is sealed to is fetched under
+the agent's own authentication, and only ciphertext is sent. Nothing is signed
+or sent until the prepared call has been checked field by field — receiver,
+method, project, ciphertext, audience, vault and deposit — so a wrong answer
+becomes a refusal rather than a signature.
 
 ### Payment Keys
 

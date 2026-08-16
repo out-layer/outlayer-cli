@@ -54,7 +54,7 @@ async fn test_payment_key_lifecycle() {
             owner: ctx.account_id.clone(),
             profile: Some(nonce.to_string()),
             secrets_json: secrets_json.clone(),
-        })
+        }, None)
         .await
         .expect("get_secrets_pubkey failed");
 

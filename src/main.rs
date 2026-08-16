@@ -214,12 +214,20 @@ enum KeysCommands {
         /// Payment key nonce
         nonce: u32,
     },
+    /// Print a payment key this machine created
+    Show {
+        /// Payment key nonce
+        nonce: u32,
+    },
     /// Top up payment key with NEAR
     Topup {
         /// Payment key nonce
         nonce: u32,
-        /// Amount in NEAR
-        amount: f64,
+        /// Amount in NEAR — mainnet only, it swaps through Intents
+        amount: Option<f64>,
+        /// Amount in USD, sent as the stablecoin itself. Works on any network.
+        #[arg(long)]
+        usd: Option<f64>,
     },
     /// Delete payment key (refunds storage)
     Delete {
@@ -269,6 +277,33 @@ enum SecretsCommands {
         /// default-master path is used.
         #[arg(long)]
         vault_id: Option<String>,
+    },
+    /// Leave a secret for an agent to use with one connector
+    SetForAgent {
+        /// JSON object: '{"KEY":"value"}'
+        secrets: String,
+
+        /// The connector's project (owner/name), as reported by
+        /// `GET /subscription/status`
+        #[arg(long)]
+        project: String,
+
+        /// Agent wallet key (wk_...). Defaults to $OUTLAYER_WALLET_KEY
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Refuse unless the secret is bound to this vault. The binding
+        /// comes from the wallet key, not from this flag — stating it
+        /// turns a wrong one into a refusal instead of a secret nobody
+        /// can decrypt.
+        #[arg(long)]
+        vault_id: Option<String>,
+
+        /// Let the agent's own wallet pay the storage deposit (it needs
+        /// ~0.11 NEAR). By default the logged-in account pays and the
+        /// agent's wallet needs no NEAR at all.
+        #[arg(long)]
+        agent_pays: bool,
     },
     /// Update secrets (preserves PROTECTED_*, merges with existing)
     Update {
@@ -600,9 +635,15 @@ async fn main() -> anyhow::Result<()> {
                 KeysCommands::Balance { nonce } => {
                     commands::keys::balance(&network, nonce).await?
                 }
-                KeysCommands::Topup { nonce, amount } => {
-                    commands::keys::topup(&network, nonce, amount).await?
-                }
+                KeysCommands::Show { nonce } => commands::keys::show(&network, nonce)?,
+                KeysCommands::Topup { nonce, amount, usd } => match (usd, amount) {
+                    (Some(usd), _) => commands::keys::topup_usd(&network, nonce, usd).await?,
+                    (None, Some(near)) => commands::keys::topup(&network, nonce, near).await?,
+                    (None, None) => anyhow::bail!(
+                        "Say how much: `--usd 1` sends the stablecoin (any network), or a \
+                         positional NEAR amount swaps through Intents (mainnet only)."
+                    ),
+                },
                 KeysCommands::Delete { nonce } => {
                     commands::keys::delete(&network, nonce).await?
                 }
@@ -694,6 +735,23 @@ async fn main() -> anyhow::Result<()> {
                         generate,
                         &access,
                         vault_id,
+                    )
+                    .await?
+                }
+                SecretsCommands::SetForAgent {
+                    secrets,
+                    project,
+                    api_key,
+                    vault_id,
+                    agent_pays,
+                } => {
+                    commands::secrets::set_for_agent(
+                        &network,
+                        secrets,
+                        project,
+                        api_key.as_deref(),
+                        vault_id,
+                        agent_pays,
                     )
                     .await?
                 }

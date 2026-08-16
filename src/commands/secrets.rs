@@ -479,6 +479,272 @@ pub async fn delete(
     Ok(())
 }
 
+// ── Set for an agent ─────────────────────────────────────────────────
+
+/// The most a `store_secrets_for` call may ask this account to attach.
+///
+/// The deposit is storage, and the contract charges 0.00001 NEAR per
+/// byte against a 10 KB ceiling — so a whole secret cannot cost more
+/// than 0.1 NEAR, and the endpoint asks for exactly that. One NEAR
+/// leaves room for the price to move without an upgrade, and is far
+/// too little to matter if an answer we did not expect ever reaches
+/// this check.
+const MAX_AGENT_SECRET_DEPOSIT_YOCTO: u128 = 1_000_000_000_000_000_000_000_000;
+
+/// NEAR's per-transaction gas ceiling. A call asking for more is not a
+/// call, so the number is wrong before it is dangerous.
+const MAX_GAS: u64 = 300_000_000_000_000;
+
+/// Refuse a pubkey that is not the one this request asked for.
+///
+/// The answer carries the seed it belongs to, and the seed is derivable
+/// from what we sent: `project:{project_id}:{agent_account}`. Rebuilding
+/// it and comparing turns "the key came back for a different agent" from
+/// something invisible into a refusal. It cannot prove the key belongs
+/// to the seed — only the holder of the master can — but it does catch
+/// the answer being for another agent entirely, which is the shape a
+/// mix-up takes.
+fn check_agent_secret_pubkey(
+    pubkey: &crate::api::AgentSecretPubkey,
+    project_id: &str,
+) -> Result<()> {
+    if pubkey.agent_account.trim().is_empty() {
+        anyhow::bail!("The coordinator returned no agent account to store the secret under");
+    }
+
+    let expected_seed = format!("project:{}:{}", project_id, pubkey.agent_account);
+    if pubkey.seed != expected_seed {
+        anyhow::bail!(
+            "The encryption key came back for a different secret than the one asked for.\n  \
+             asked for: {expected_seed}\n  \
+             answered:  {}\n\
+             Nothing was encrypted. Sealing a credential to this key would hand it to \
+             whoever the other seed belongs to.",
+            pubkey.seed,
+        );
+    }
+
+    Ok(())
+}
+
+/// Refuse to sign a prepared call that is not the one we asked for.
+///
+/// The call comes back from the coordinator and would be sent by a full
+/// access key, so every field of it is attacker-controlled input until
+/// checked. Signing it unread would make this command a way to get an
+/// arbitrary transaction signed by anyone who runs it — the receiver,
+/// the method and the deposit all arrive over the same wire as the
+/// signature.
+///
+/// The ciphertext is checked too, and for a different reason: it is the
+/// one field whose substitution would still produce a valid, working
+/// secret — an older credential replayed into place, which for a
+/// rotation is the whole attack.
+fn check_prepared_agent_secret(
+    prepared: &crate::api::PreparedAgentSecret,
+    contract_id: &str,
+    project_id: &str,
+    encrypted_secrets_base64: &str,
+    expected_vault_id: Option<&str>,
+) -> Result<()> {
+    if prepared.contract_id != contract_id {
+        anyhow::bail!(
+            "The prepared call is addressed to '{}', not to the OutLayer contract '{contract_id}'. \
+             Nothing was signed.",
+            prepared.contract_id,
+        );
+    }
+    if prepared.method_name != "store_secrets_for" {
+        anyhow::bail!(
+            "The prepared call invokes '{}', not 'store_secrets_for'. Nothing was signed.",
+            prepared.method_name,
+        );
+    }
+
+    let args = prepared
+        .args
+        .as_object()
+        .context("The prepared call carries no arguments object")?;
+
+    let str_arg = |name: &str| -> Result<&str> {
+        args.get(name)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("The prepared call is missing a string '{name}' argument"))
+    };
+
+    let expected_accessor = json!({ "Project": { "project_id": project_id } });
+    let accessor = args
+        .get("accessor")
+        .context("The prepared call is missing its 'accessor' argument")?;
+    if accessor != &expected_accessor {
+        anyhow::bail!(
+            "The prepared call stores the secret against {}, not against project '{project_id}'. \
+             Nothing was signed.",
+            format_accessor(accessor),
+        );
+    }
+
+    if str_arg("encrypted_secrets_base64")? != encrypted_secrets_base64 {
+        anyhow::bail!(
+            "The prepared call carries different ciphertext than the one just encrypted. \
+             Nothing was signed — sending it would store a secret this machine did not produce."
+        );
+    }
+
+    if str_arg("profile")? != prepared.agent_account {
+        anyhow::bail!(
+            "The prepared call names the secret '{}' while reporting the agent as '{}'. \
+             Nothing was signed.",
+            str_arg("profile")?,
+            prepared.agent_account,
+        );
+    }
+
+    let access = args
+        .get("access")
+        .context("The prepared call is missing its 'access' argument")?;
+    if access != &json!("AllowAll") {
+        anyhow::bail!(
+            "The prepared call grants {} rather than naming the agent as the sole reader. \
+             Nothing was signed.",
+            format_access(access),
+        );
+    }
+
+    // The vault is decided by the wallet key's own binding, not by this
+    // request, so there is no value to require — only one to report. A
+    // caller who knows which vault they expect says so, and gets a
+    // refusal instead of a surprise.
+    let vault_id = args.get("vault_id").and_then(|v| v.as_str());
+    if let Some(expected) = expected_vault_id {
+        if vault_id != Some(expected) {
+            anyhow::bail!(
+                "The prepared call binds the secret to {} rather than to the expected vault \
+                 '{expected}'. Nothing was signed — a secret sealed under one vault's master \
+                 cannot be read under another's.",
+                vault_id
+                    .map(|v| format!("vault '{v}'"))
+                    .unwrap_or_else(|| "the default master".to_string()),
+            );
+        }
+    }
+
+    if str_arg("wallet_pubkey")?.is_empty() || str_arg("wallet_signature")?.is_empty() {
+        anyhow::bail!(
+            "The prepared call carries no wallet signature. The contract would reject it; \
+             nothing was signed."
+        );
+    }
+
+    let deposit: u128 = prepared
+        .deposit
+        .parse()
+        .with_context(|| format!("Deposit '{}' is not a number", prepared.deposit))?;
+    if deposit > MAX_AGENT_SECRET_DEPOSIT_YOCTO {
+        anyhow::bail!(
+            "The prepared call asks this account to attach {} yoctoNEAR, more than the {} \
+             a secret's storage can cost. Nothing was signed.",
+            deposit,
+            MAX_AGENT_SECRET_DEPOSIT_YOCTO,
+        );
+    }
+
+    let gas: u64 = prepared
+        .gas
+        .parse()
+        .with_context(|| format!("Gas '{}' is not a number", prepared.gas))?;
+    if gas == 0 || gas > MAX_GAS {
+        anyhow::bail!(
+            "The prepared call asks for {gas} gas, which is outside what a transaction may \
+             attach. Nothing was signed."
+        );
+    }
+
+    Ok(())
+}
+
+/// `outlayer secrets set-for-agent '{"KEY":"val"}' --project <owner>/<name>`
+///
+/// Leaves a credential for an agent to use with one connector: sealed to
+/// the agent's own key, stored on chain under the agent's name, readable
+/// by the agent and by nobody else.
+///
+/// The plaintext never leaves this machine. What goes out is ciphertext
+/// the coordinator cannot read, sealed to a key fetched under the
+/// agent's own authentication.
+pub async fn set_for_agent(
+    network: &NetworkConfig,
+    secrets_json: String,
+    project_id: String,
+    api_key: Option<&str>,
+    vault_id: Option<String>,
+    agent_pays: bool,
+) -> Result<()> {
+    let secrets_map = parse_secrets_json(&secrets_json)?;
+    let secrets_str = Value::Object(secrets_map.clone()).to_string();
+
+    let wallet_key = super::checks::resolve_wallet_key(api_key)?;
+    let api = ApiClient::new(network);
+
+    let pubkey = api
+        .agent_secret_pubkey(&wallet_key, &project_id)
+        .await
+        .context("Failed to get the agent's encryption key")?;
+    check_agent_secret_pubkey(&pubkey, &project_id)?;
+
+    let encrypted = crypto::encrypt_secrets(&pubkey.pubkey, &secrets_str)?;
+
+    let agent_account = if agent_pays {
+        let stored = api
+            .store_agent_secret(&wallet_key, &project_id, &encrypted)
+            .await?;
+        eprintln!("Stored by the agent's own wallet, tx {}", stored.tx_hash);
+        stored.agent_account
+    } else {
+        let creds = config::load_credentials(network)?;
+        let prepared = api
+            .prepare_agent_secret(&wallet_key, &project_id, &encrypted, &creds.account_id)
+            .await?;
+        check_prepared_agent_secret(
+            &prepared,
+            &network.contract_id,
+            &project_id,
+            &encrypted,
+            vault_id.as_deref(),
+        )?;
+
+        // The receiver is this network's contract id, not the one the
+        // answer named — they were just compared, and taking ours keeps
+        // the destination of a signed transaction decided here.
+        let caller = ContractCaller::from_credentials(&creds, network)?;
+        let outcome = caller
+            .call_contract(
+                &prepared.method_name,
+                prepared.args.clone(),
+                prepared.gas.parse()?,
+                prepared.deposit.parse()?,
+            )
+            .await
+            .context("Failed to store the agent's secret")?;
+
+        eprintln!(
+            "Stored, paid by {}, tx {}",
+            creds.account_id,
+            outcome.tx_hash.as_deref().unwrap_or("-"),
+        );
+        prepared.agent_account
+    };
+
+    let mut keys: Vec<&String> = secrets_map.keys().collect();
+    keys.sort();
+    eprintln!(
+        "Secret for {agent_account} on {project_id} (keys: {})",
+        keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "),
+    );
+
+    Ok(())
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn format_accessor(accessor: &Value) -> String {
@@ -520,4 +786,168 @@ fn format_access(access: &Value) -> String {
         }
     }
     access.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{AgentSecretPubkey, PreparedAgentSecret};
+
+    const PROJECT: &str = "connectors.outlayer.testnet/connector-probe";
+    const AGENT: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const CIPHERTEXT: &str = "AQIDBAUGBwgJCgsMDQ4PEA==";
+    const CONTRACT: &str = "outlayer.testnet";
+
+    fn pubkey_answer() -> AgentSecretPubkey {
+        AgentSecretPubkey {
+            pubkey: "aa".repeat(32),
+            seed: format!("project:{PROJECT}:{AGENT}"),
+            agent_account: AGENT.to_string(),
+        }
+    }
+
+    fn prepared_call() -> PreparedAgentSecret {
+        PreparedAgentSecret {
+            contract_id: CONTRACT.to_string(),
+            method_name: "store_secrets_for".to_string(),
+            args: json!({
+                "wallet_pubkey": "ed25519:11111111111111111111111111111111",
+                "accessor": { "Project": { "project_id": PROJECT } },
+                "profile": AGENT,
+                "encrypted_secrets_base64": CIPHERTEXT,
+                "access": "AllowAll",
+                "vault_id": "vault.alice.testnet",
+                "wallet_signature": "ab".repeat(64),
+            }),
+            deposit: "100000000000000000000000".to_string(),
+            gas: "100000000000000".to_string(),
+            agent_account: AGENT.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_answer_this_request_asked_for_is_accepted() {
+        check_agent_secret_pubkey(&pubkey_answer(), PROJECT).unwrap();
+        check_prepared_agent_secret(
+            &prepared_call(),
+            CONTRACT,
+            PROJECT,
+            CIPHERTEXT,
+            Some("vault.alice.testnet"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_key_for_another_agent_is_refused() {
+        let mut answer = pubkey_answer();
+        answer.seed = format!("project:{PROJECT}:someone-else.testnet");
+        let err = check_agent_secret_pubkey(&answer, PROJECT).unwrap_err().to_string();
+        assert!(err.contains("different secret"), "{err}");
+    }
+
+    #[test]
+    fn a_key_for_another_project_is_refused() {
+        // Same agent, same shape, another connector: the seed names the
+        // project, so encrypting to this key would seal the credential
+        // where a different connector's code can ask for it.
+        let answer = pubkey_answer();
+        assert!(check_agent_secret_pubkey(&answer, "connectors.outlayer.testnet/other").is_err());
+    }
+
+    #[test]
+    fn a_nameless_agent_is_refused() {
+        let mut answer = pubkey_answer();
+        answer.agent_account = "  ".to_string();
+        assert!(check_agent_secret_pubkey(&answer, PROJECT).is_err());
+    }
+
+    /// Every field of a prepared call is attacker-controlled input until
+    /// checked, and this is the list of what checking it means. A field
+    /// that stops being checked fails here rather than in someone's
+    /// account.
+    #[test]
+    fn a_prepared_call_that_is_not_the_one_asked_for_is_refused() {
+        let cases: Vec<(&str, Box<dyn Fn(&mut PreparedAgentSecret)>)> = vec![
+            (
+                "another receiver",
+                Box::new(|p| p.contract_id = "attacker.testnet".to_string()),
+            ),
+            (
+                "another method",
+                Box::new(|p| p.method_name = "ft_transfer".to_string()),
+            ),
+            (
+                "another project",
+                Box::new(|p| {
+                    p.args["accessor"] = json!({ "Project": { "project_id": "x.testnet/y" } })
+                }),
+            ),
+            (
+                "substituted ciphertext",
+                Box::new(|p| p.args["encrypted_secrets_base64"] = json!("b3RoZXI=")),
+            ),
+            (
+                "another name",
+                Box::new(|p| p.args["profile"] = json!("other.testnet")),
+            ),
+            (
+                "a wider audience",
+                Box::new(|p| p.args["access"] = json!({ "Whitelist": ["attacker.testnet"] })),
+            ),
+            (
+                "another vault",
+                Box::new(|p| p.args["vault_id"] = json!("vault.attacker.testnet")),
+            ),
+            (
+                "the default master instead of the vault",
+                Box::new(|p| p.args["vault_id"] = json!(null)),
+            ),
+            (
+                "no signature",
+                Box::new(|p| p.args["wallet_signature"] = json!("")),
+            ),
+            (
+                "a draining deposit",
+                Box::new(|p| p.deposit = "5000000000000000000000000".to_string()),
+            ),
+            (
+                "impossible gas",
+                Box::new(|p| p.gas = "500000000000000".to_string()),
+            ),
+            (
+                "no arguments at all",
+                Box::new(|p| p.args = json!("nothing")),
+            ),
+        ];
+
+        for (name, tamper) in cases {
+            let mut prepared = prepared_call();
+            tamper(&mut prepared);
+            assert!(
+                check_prepared_agent_secret(
+                    &prepared,
+                    CONTRACT,
+                    PROJECT,
+                    CIPHERTEXT,
+                    Some("vault.alice.testnet"),
+                )
+                .is_err(),
+                "a prepared call with {name} was accepted",
+            );
+        }
+    }
+
+    /// Without `--vault-id` there is nothing to compare against, so the
+    /// binding the coordinator chose is reported rather than enforced.
+    /// Everything else is still checked.
+    #[test]
+    fn an_unstated_vault_expectation_checks_everything_else() {
+        let mut prepared = prepared_call();
+        prepared.args["vault_id"] = json!("vault.someone.testnet");
+        check_prepared_agent_secret(&prepared, CONTRACT, PROJECT, CIPHERTEXT, None).unwrap();
+
+        prepared.args["access"] = json!({ "Whitelist": ["attacker.testnet"] });
+        assert!(check_prepared_agent_secret(&prepared, CONTRACT, PROJECT, CIPHERTEXT, None).is_err());
+    }
 }

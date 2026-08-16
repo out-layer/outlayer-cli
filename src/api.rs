@@ -706,6 +706,118 @@ impl ApiClient {
             .context("Failed to parse peek response")
     }
 
+    // ── A secret left for an agent ─────────────────────────────────────
+
+    /// `GET /wallet/v1/agent-secret/pubkey` — the key to seal a secret
+    /// for this agent, plus the name it will be stored under.
+    ///
+    /// The key is fetched under the caller's own authentication rather
+    /// than accepted as an argument. A key handed in from outside is a
+    /// key nobody checked: sealing a live credential to it hands the
+    /// credential to whoever produced it, and nothing later in the flow
+    /// would notice, because ciphertext is ciphertext.
+    pub async fn agent_secret_pubkey(
+        &self,
+        wallet_key: &str,
+        project_id: &str,
+    ) -> Result<AgentSecretPubkey> {
+        let url = format!("{}/wallet/v1/agent-secret/pubkey", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", wallet_key))
+            .query(&[("project_id", project_id)])
+            .send()
+            .await
+            .context("Failed to get the agent secret pubkey")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to get the agent secret pubkey ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse the agent secret pubkey response")
+    }
+
+    /// `POST /wallet/v1/agent-secret` — store it, with the agent's own
+    /// wallet paying the storage deposit.
+    pub async fn store_agent_secret(
+        &self,
+        wallet_key: &str,
+        project_id: &str,
+        encrypted_secrets_base64: &str,
+    ) -> Result<StoredAgentSecret> {
+        let url = format!("{}/wallet/v1/agent-secret", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", wallet_key))
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "encrypted_secrets_base64": encrypted_secrets_base64,
+            }))
+            .send()
+            .await
+            .context("Failed to store the agent secret")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to store the agent secret ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse the store response")
+    }
+
+    /// `POST /wallet/v1/agent-secret/prepare` — the same store, as a
+    /// call for `payer` to send and pay for.
+    ///
+    /// What comes back is signed by the agent's wallet but addressed by
+    /// us: validate it before signing anything (see
+    /// `commands::secrets::check_prepared_agent_secret`).
+    pub async fn prepare_agent_secret(
+        &self,
+        wallet_key: &str,
+        project_id: &str,
+        encrypted_secrets_base64: &str,
+        payer: &str,
+    ) -> Result<PreparedAgentSecret> {
+        let url = format!("{}/wallet/v1/agent-secret/prepare", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", wallet_key))
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "encrypted_secrets_base64": encrypted_secrets_base64,
+                "payer": payer,
+            }))
+            .send()
+            .await
+            .context("Failed to prepare the agent secret call")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to prepare the agent secret call ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse the prepared call")
+    }
+
     // ── Vault init helpers ─────────────────────────────────────────────
 
     /// `POST /customer/derive-tee-key` — fetch the deterministic TEE
@@ -930,4 +1042,35 @@ pub struct PaymentCheckPeekResponse {
     pub memo: Option<String>,
     pub status: String,
     pub expires_at: Option<String>,
+}
+
+/// What to seal a secret to, and the name it will be stored under.
+#[derive(Debug, Deserialize)]
+pub struct AgentSecretPubkey {
+    /// X25519 public key, hex. Encrypt-only.
+    pub pubkey: String,
+    /// The seed the key belongs to. Returned so that a mismatch is
+    /// visible instead of silent — see `check_agent_secret_pubkey`.
+    pub seed: String,
+    /// The agent's account: both the secret's name and its owner.
+    pub agent_account: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StoredAgentSecret {
+    pub tx_hash: String,
+    pub agent_account: String,
+}
+
+/// A `store_secrets_for` call, ready for the payer to send.
+#[derive(Debug, Deserialize)]
+pub struct PreparedAgentSecret {
+    pub contract_id: String,
+    pub method_name: String,
+    /// Complete JSON arguments, including the agent wallet's signature.
+    pub args: Value,
+    /// Attached deposit in yoctoNEAR; the contract refunds the excess.
+    pub deposit: String,
+    pub gas: String,
+    pub agent_account: String,
 }

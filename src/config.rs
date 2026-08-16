@@ -223,6 +223,230 @@ fn delete_private_key(network: &str, account_id: &str) {
     }
 }
 
+// ── Payment keys ───────────────────────────────────────────────────────
+//
+// A payment key is not a stored secret that can be fetched back later. It is
+// the CREDENTIAL — the `owner:nonce:key` string sent as `X-Payment-Key` — and
+// it exists in exactly two places: this process, and the blob on chain that
+// only the keystore can decrypt and that nothing is allowed to reveal. Lose the
+// plaintext and the key is unusable forever, while still holding its storage
+// deposit and any balance topped into it.
+//
+// So it has to be written down before the transaction that creates it is sent,
+// not after it comes back. What is irreversible is the transaction; everything
+// after it is a place a process can die.
+
+fn payment_key_ref(network: &str, account_id: &str, nonce: u32) -> String {
+    format!("{network}:{account_id}:payment-key:{nonce}")
+}
+
+fn payment_keys_path(network: &str) -> Result<PathBuf> {
+    let home = outlayer_home()?;
+    Ok(home.join(network).join("payment-keys.json"))
+}
+
+/// Keep a payment key before anything irreversible happens to it.
+///
+/// A file, deliberately, and NOT the keyring that holds the account's private
+/// key. `keyring = "3"` is built here with no platform feature, and the crate
+/// documents what that means: every platform gets the *mock* store, which lives
+/// in the calling process's memory. A write to it succeeds, a read back in the
+/// same process succeeds, and nothing exists afterwards — verified against the
+/// login keychain, which has no entry for a key this reported saving.
+///
+/// For the account key that is merely useless: `login` writes it to
+/// `credentials.json` regardless and throws the keyring's answer away. For a
+/// payment key it would be worse than useless, because there is no second copy
+/// to fall back on — reporting "saved" and storing nothing is precisely the
+/// failure this function exists to prevent.
+pub fn save_payment_key(network: &str, account_id: &str, nonce: u32, key: &str) -> Result<PathBuf> {
+    let path = payment_keys_path(network)?;
+    write_key_file(&path, &payment_key_ref(network, account_id, nonce), key)?;
+
+    // Read back through the same path `show` will use. A save that cannot be
+    // read is the whole bug in a different costume, and it must not be
+    // discovered later by somebody holding an unusable key.
+    if load_payment_key(network, account_id, nonce).as_deref() != Some(key) {
+        anyhow::bail!(
+            "Wrote {} but could not read the key back from it",
+            path.display()
+        );
+    }
+
+    Ok(path)
+}
+
+/// Add one key to the on-disk store, keeping whatever is already there.
+///
+/// Split out from [`save_payment_key`] so the path can be exercised against a
+/// temporary directory: the public function derives its path from the user's
+/// home, and a test that wrote there would be editing the operator's real keys.
+fn write_key_file(path: &PathBuf, reference: &str, key: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Merged, never overwritten: the file holds every key this machine made,
+    // and a create that replaced the file would destroy the earlier ones.
+    //
+    // A file that EXISTS but cannot be read is the dangerous case — unreadable
+    // and empty are the same answer from `read_key_file`, so merging into an
+    // empty map and truncating would silently destroy every other key on the
+    // machine, none of which can be recovered from anywhere. It is moved aside
+    // instead, and the operator is told where it went.
+    let mut all = read_key_file(path);
+    if all.is_empty() && path.exists() {
+        let kept = path.with_extension("json.unreadable");
+        std::fs::rename(path, &kept).with_context(|| {
+            format!(
+                "{} exists but could not be read, and could not be moved aside either. \
+                 Refusing to overwrite it: it may hold keys that exist nowhere else.",
+                path.display()
+            )
+        })?;
+        eprintln!(
+            "warning: {} could not be read; moved to {} rather than overwritten",
+            path.display(),
+            kept.display()
+        );
+    }
+
+    all.insert(reference.to_string(), key.to_string());
+    let data = serde_json::to_string_pretty(&all)?;
+
+    // Owner-only from the moment it exists. Narrowing the mode after writing
+    // would leave the secret readable for the window in between, which is the
+    // whole thing this is guarding against.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Could not write {}", path.display()))?;
+        f.write_all(data.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, &data)
+            .with_context(|| format!("Could not write {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Every key in the on-disk store, or none. A missing or unreadable file is an
+/// empty store rather than an error: it is how the first key ever saved finds
+/// the file, and a parse failure must not stop the NEXT key being written down.
+fn read_key_file(path: &PathBuf) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Read back a payment key this machine created.
+pub fn load_payment_key(network: &str, account_id: &str, nonce: u32) -> Option<String> {
+    let path = payment_keys_path(network).ok()?;
+    read_key_file(&path)
+        .get(&payment_key_ref(network, account_id, nonce))
+        .cloned()
+}
+
+#[cfg(test)]
+mod payment_key_store_tests {
+    use super::*;
+
+    /// A key survives being written, and writing a second one does not take the
+    /// first with it.
+    ///
+    /// The whole reason this store exists is that a payment key has no other
+    /// copy: the chain holds it encrypted for the keystore and nothing gives it
+    /// back. A `create` that clobbered the file would destroy every earlier key
+    /// on the machine, silently, and the balances behind them with it.
+    #[test]
+    fn keys_accumulate_rather_than_replace_each_other() {
+        let dir = std::env::temp_dir().join(format!(
+            "outlayer-keystore-test-{}",
+            std::process::id()
+        ));
+        let path = dir.join("payment-keys.json");
+        let _ = std::fs::remove_file(&path);
+
+        write_key_file(&path, "testnet:alice.testnet:payment-key:1", "alice:1:aaa").unwrap();
+        write_key_file(&path, "testnet:alice.testnet:payment-key:2", "alice:2:bbb").unwrap();
+
+        let all = read_key_file(&path);
+        assert_eq!(all.len(), 2, "the second write kept the first key");
+        assert_eq!(all["testnet:alice.testnet:payment-key:1"], "alice:1:aaa");
+        assert_eq!(all["testnet:alice.testnet:payment-key:2"], "alice:2:bbb");
+
+        // Same nonce again replaces just that one — a re-created key at the
+        // same nonce is a different key, and keeping the old one would hand
+        // back a string that no longer opens anything.
+        write_key_file(&path, "testnet:alice.testnet:payment-key:1", "alice:1:ccc").unwrap();
+        let all = read_key_file(&path);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["testnet:alice.testnet:payment-key:1"], "alice:1:ccc");
+
+        // Nobody but the owner can read it. This file is a plaintext credential
+        // on disk; the mode is what makes that acceptable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the key file must be owner-only");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An absent or corrupt store still accepts the next key — and a corrupt
+    /// one is PRESERVED rather than replaced.
+    ///
+    /// Both halves matter and they pull against each other. The next key has to
+    /// be writable, or a file somebody edited by hand turns into an unspendable
+    /// key. But "unreadable" and "empty" are the same answer from
+    /// `read_key_file`, so merging into it and truncating would wipe every
+    /// other key on the machine — and those exist nowhere else, so there would
+    /// be nothing to restore from.
+    #[test]
+    fn a_corrupt_store_is_moved_aside_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!(
+            "outlayer-keystore-broken-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payment-keys.json");
+
+        assert!(read_key_file(&path).is_empty(), "no file is an empty store");
+
+        std::fs::write(&path, "{not json — but it may hold keys").unwrap();
+        assert!(read_key_file(&path).is_empty(), "a corrupt file reads as empty");
+
+        write_key_file(&path, "testnet:alice.testnet:payment-key:7", "alice:7:ddd").unwrap();
+
+        // The new key went in...
+        assert_eq!(read_key_file(&path)["testnet:alice.testnet:payment-key:7"], "alice:7:ddd");
+        assert_eq!(read_key_file(&path).len(), 1);
+
+        // ...and the bytes nobody could parse are still on disk.
+        let kept = path.with_extension("json.unreadable");
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "{not json — but it may hold keys",
+            "the unreadable store must survive verbatim — it cannot be recovered from anywhere else",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 // ── Credential Operations ──────────────────────────────────────────────
 
 pub fn load_credentials(network: &NetworkConfig) -> Result<Credentials> {
