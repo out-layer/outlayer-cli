@@ -481,7 +481,7 @@ pub async fn delete(
 
 // ── Set for an agent ─────────────────────────────────────────────────
 
-/// The most a `store_secrets_for` call may ask this account to attach.
+/// The most a `store_agent_secret` call may ask this account to attach.
 ///
 /// The deposit is storage, and the contract charges 0.00001 NEAR per
 /// byte against a 10 KB ceiling — so a whole secret cannot cost more
@@ -554,9 +554,9 @@ fn check_prepared_agent_secret(
             prepared.contract_id,
         );
     }
-    if prepared.method_name != "store_secrets_for" {
+    if prepared.method_name != "store_agent_secret" {
         anyhow::bail!(
-            "The prepared call invokes '{}', not 'store_secrets_for'. Nothing was signed.",
+            "The prepared call invokes '{}', not 'store_agent_secret'. Nothing was signed.",
             prepared.method_name,
         );
     }
@@ -629,7 +629,7 @@ fn check_prepared_agent_secret(
         }
     }
 
-    if str_arg("wallet_pubkey")?.is_empty() || str_arg("wallet_signature")?.is_empty() {
+    if str_arg("agent_pubkey")?.is_empty() || str_arg("wallet_signature")?.is_empty() {
         anyhow::bail!(
             "The prepared call carries no wallet signature. The contract would reject it; \
              nothing was signed."
@@ -809,9 +809,9 @@ mod tests {
     fn prepared_call() -> PreparedAgentSecret {
         PreparedAgentSecret {
             contract_id: CONTRACT.to_string(),
-            method_name: "store_secrets_for".to_string(),
+            method_name: "store_agent_secret".to_string(),
             args: json!({
-                "wallet_pubkey": "ed25519:11111111111111111111111111111111",
+                "agent_pubkey": "ed25519:11111111111111111111111111111111",
                 "accessor": { "Project": { "project_id": PROJECT } },
                 "profile": AGENT,
                 "encrypted_secrets_base64": CIPHERTEXT,

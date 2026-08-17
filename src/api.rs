@@ -1062,7 +1062,7 @@ pub struct StoredAgentSecret {
     pub agent_account: String,
 }
 
-/// A `store_secrets_for` call, ready for the payer to send.
+/// A `store_agent_secret` call, ready for the payer to send.
 #[derive(Debug, Deserialize)]
 pub struct PreparedAgentSecret {
     pub contract_id: String,
