@@ -15,6 +15,41 @@ use serde_json::Value;
 use crate::api::ApiClient;
 use crate::config::{self, Credentials, NetworkConfig};
 
+// ── Paged views ────────────────────────────────────────────────────────
+
+/// How many index entries a page of `list_user_secrets` asks for. Below the
+/// contract's own ceiling of 500, so the window is exactly what is requested.
+const SECRETS_PAGE: u64 = 200;
+
+/// Walk a paged view until a page comes back EMPTY, and return everything.
+///
+/// `from_index` counts INDEX ENTRIES, not answers. `list_user_secrets` takes
+/// its window first and only then drops entries whose secret is gone, so a
+/// window of `page` keys can answer with fewer items — and advancing by what
+/// came back would re-read part of the window and, worse, read a short page as
+/// the end of the list. This advances by the window size, and an empty answer
+/// is the only signal it treats as "nothing left".
+///
+/// Written as its own function so the walk can be exercised without a network:
+/// the loop is the part with the interesting failure modes, and the version
+/// before this one shipped with two of them.
+async fn collect_pages<T, F, Fut>(page: u64, mut fetch: F) -> Result<Vec<T>>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<T>>>,
+{
+    let mut all: Vec<T> = Vec::new();
+    let mut from_index: u64 = 0;
+    loop {
+        let batch = fetch(from_index).await?;
+        if batch.is_empty() {
+            return Ok(all);
+        }
+        all.extend(batch);
+        from_index += page;
+    }
+}
+
 // ── NearClient (view calls, no auth) ───────────────────────────────────
 
 pub struct NearClient {
@@ -240,11 +275,34 @@ impl NearClient {
         Ok(result)
     }
 
+    /// Every secret of an account, by asking for pages until one comes back
+    /// empty.
+    ///
+    /// The contract hands out a PAGE — it walks a set and reads storage per
+    /// entry, so an unbounded answer is a view that eventually cannot be called
+    /// at all. Taking the first page and calling it "the list" would show
+    /// somebody a truncated inventory of their own secrets with nothing to say
+    /// so, which is the failure this loop exists to prevent.
+    ///
+    /// **`from_index` counts KEYS, not answers.** The contract skips and takes
+    /// over the index and only then drops entries whose secret is gone, so a
+    /// window of `PAGE` keys can come back with fewer items — advancing by what
+    /// was RETURNED would re-read part of the window and, worse, treat a short
+    /// page as the end of the list. This walks by the window size and stops on
+    /// an empty answer, which is the only reading of "nothing left" that does
+    /// not depend on how many entries the contract filtered out.
     pub async fn list_user_secrets(&self, account_id: &str) -> Result<Vec<UserSecretInfo>> {
-        self.view_call(
-            "list_user_secrets",
-            serde_json::json!({ "account_id": account_id }),
-        )
+        collect_pages(SECRETS_PAGE, |from_index| async move {
+            self.view_call(
+                "list_user_secrets",
+                serde_json::json!({
+                    "account_id": account_id,
+                    "from_index": from_index,
+                    "limit": SECRETS_PAGE,
+                }),
+            )
+            .await
+        })
         .await
     }
 
@@ -859,4 +917,86 @@ pub enum AccessKeyPerm {
         receiver_id: String,
         method_names: Vec<String>,
     },
+}
+
+#[cfg(test)]
+mod paged_view_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Serve `total` items in windows of `page`, dropping the entries listed in
+    /// `holes` — the shape `list_user_secrets` produces when the index holds a
+    /// key whose secret is gone. Records the offsets it was asked for.
+    fn server<'a>(
+        total: u64,
+        page: u64,
+        holes: &'static [u64],
+        asked: &'a RefCell<Vec<u64>>,
+    ) -> impl Fn(u64) -> std::future::Ready<Result<Vec<u64>>> + 'a {
+        move |from_index: u64| {
+            asked.borrow_mut().push(from_index);
+            let items: Vec<u64> = (from_index..(from_index + page).min(total))
+                .filter(|i| !holes.contains(i))
+                .collect();
+            std::future::ready(Ok(items))
+        }
+    }
+
+    /// The whole list comes back, and the walk stops one page past the end.
+    #[tokio::test]
+    async fn it_collects_every_page() {
+        let asked = RefCell::new(Vec::new());
+        let got = collect_pages(10, server(25, 10, &[], &asked)).await.unwrap();
+
+        assert_eq!(got.len(), 25);
+        assert_eq!(got, (0..25).collect::<Vec<u64>>());
+        assert_eq!(*asked.borrow(), vec![0, 10, 20, 30], "one empty page ends it");
+    }
+
+    /// A SHORT page is not the end of the list.
+    ///
+    /// This is the bug the walk was written for: the contract filters after it
+    /// takes its window, so a page can be short while entries remain behind it.
+    /// A loop that stopped here would silently show somebody part of their own
+    /// inventory.
+    #[tokio::test]
+    async fn a_short_page_does_not_end_the_walk() {
+        let asked = RefCell::new(Vec::new());
+        // Every entry in the second window is missing but the third is full.
+        let holes: &'static [u64] = &[10, 11, 12, 13, 14, 15, 16, 17, 18];
+        let got = collect_pages(10, server(25, 10, holes, &asked)).await.unwrap();
+
+        assert_eq!(got.len(), 16, "nine dropped entries, everything else kept");
+        assert!(got.contains(&24), "the page BEHIND the short one must be read");
+        assert_eq!(*asked.borrow(), vec![0, 10, 20, 30]);
+    }
+
+    /// An account with nothing asks once and answers nothing.
+    #[tokio::test]
+    async fn an_empty_account_costs_one_call() {
+        let asked = RefCell::new(Vec::new());
+        let got = collect_pages(10, server(0, 10, &[], &asked)).await.unwrap();
+
+        assert!(got.is_empty());
+        assert_eq!(*asked.borrow(), vec![0]);
+    }
+
+    /// A failing page fails the walk rather than truncating it: half a list
+    /// reported as the whole list is the failure this must never produce.
+    #[tokio::test]
+    async fn a_failed_page_is_not_a_short_list() {
+        let asked = RefCell::new(Vec::new());
+        let result = collect_pages(10, |from_index: u64| {
+            asked.borrow_mut().push(from_index);
+            std::future::ready(if from_index == 0 {
+                Ok((0..10).collect::<Vec<u64>>())
+            } else {
+                Err(anyhow::anyhow!("rpc said no"))
+            })
+        })
+        .await;
+
+        assert!(result.is_err(), "the caller must not receive a partial list");
+        assert_eq!(*asked.borrow(), vec![0, 10]);
+    }
 }

@@ -293,7 +293,7 @@ impl ApiClient {
         &self,
         request: &GetPubkeyRequest,
         vault_id: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<SecretsPubkey> {
         let url = format!("{}/secrets/pubkey", self.base_url);
 
         let mut req = self.client.post(&url).json(request);
@@ -314,6 +314,23 @@ impl ApiClient {
         #[derive(Deserialize)]
         struct PubkeyResponse {
             pubkey: String,
+            #[serde(default)]
+            accessor: Option<PubkeyAccessor>,
+        }
+
+        /// Only the field this needs: what the coordinator made of the repo.
+        ///
+        /// Read tolerantly — an accessor that is not a repository has no such
+        /// field. The cost of that tolerance is that a REMOVED field looks
+        /// exactly like a non-repository accessor: normalisation would switch
+        /// itself off and secrets would go back to being stored under whatever
+        /// the user typed, with nothing failing. The field is marked
+        /// accordingly on the answering side (`PubkeyResponseAccessor`); if it
+        /// ever has to change, this is the other half that must change with it.
+        #[derive(Deserialize)]
+        struct PubkeyAccessor {
+            #[serde(default)]
+            repo_normalized: Option<String>,
         }
 
         let resp: PubkeyResponse = response
@@ -321,7 +338,10 @@ impl ApiClient {
             .await
             .context("Failed to parse pubkey response")?;
 
-        Ok(resp.pubkey)
+        Ok(SecretsPubkey {
+            pubkey: resp.pubkey,
+            repo_normalized: resp.accessor.and_then(|a| a.repo_normalized),
+        })
     }
 
     // ── Payment Check Methods ──────────────────────────────────────────
@@ -719,7 +739,7 @@ impl ApiClient {
     pub async fn agent_secret_pubkey(
         &self,
         wallet_key: &str,
-        project_id: &str,
+        scope: &AgentSecretScope,
     ) -> Result<AgentSecretPubkey> {
         let url = format!("{}/wallet/v1/agent-secret/pubkey", self.base_url);
 
@@ -727,7 +747,7 @@ impl ApiClient {
             .client
             .get(&url)
             .header("Authorization", format!("Bearer {}", wallet_key))
-            .query(&[("project_id", project_id)])
+            .query(&[scope.query_pair()])
             .send()
             .await
             .context("Failed to get the agent secret pubkey")?;
@@ -749,19 +769,19 @@ impl ApiClient {
     pub async fn store_agent_secret(
         &self,
         wallet_key: &str,
-        project_id: &str,
+        scope: &AgentSecretScope,
         encrypted_secrets_base64: &str,
     ) -> Result<StoredAgentSecret> {
         let url = format!("{}/wallet/v1/agent-secret", self.base_url);
+
+        let mut body = scope.body_fields();
+        body["encrypted_secrets_base64"] = serde_json::json!(encrypted_secrets_base64);
 
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", wallet_key))
-            .json(&serde_json::json!({
-                "project_id": project_id,
-                "encrypted_secrets_base64": encrypted_secrets_base64,
-            }))
+            .json(&body)
             .send()
             .await
             .context("Failed to store the agent secret")?;
@@ -787,21 +807,21 @@ impl ApiClient {
     pub async fn prepare_agent_secret(
         &self,
         wallet_key: &str,
-        project_id: &str,
+        scope: &AgentSecretScope,
         encrypted_secrets_base64: &str,
         payer: &str,
     ) -> Result<PreparedAgentSecret> {
         let url = format!("{}/wallet/v1/agent-secret/prepare", self.base_url);
 
+        let mut body = scope.body_fields();
+        body["encrypted_secrets_base64"] = serde_json::json!(encrypted_secrets_base64);
+        body["payer"] = serde_json::json!(payer);
+
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", wallet_key))
-            .json(&serde_json::json!({
-                "project_id": project_id,
-                "encrypted_secrets_base64": encrypted_secrets_base64,
-                "payer": payer,
-            }))
+            .json(&body)
             .send()
             .await
             .context("Failed to prepare the agent secret call")?;
@@ -816,6 +836,44 @@ impl ApiClient {
             .json()
             .await
             .context("Failed to parse the prepared call")
+    }
+
+    /// `POST /wallet/v1/agent-secret/delete/prepare` — the removal, as a
+    /// call for `payer` to send.
+    ///
+    /// Checked before signing exactly as the store is, and for a sharper
+    /// reason: a delete is irreversible, and the arguments arrive over
+    /// the same wire as the signature that makes them valid.
+    pub async fn prepare_agent_secret_delete(
+        &self,
+        wallet_key: &str,
+        scope: &AgentSecretScope,
+        payer: &str,
+    ) -> Result<PreparedAgentSecretDelete> {
+        let url = format!("{}/wallet/v1/agent-secret/delete/prepare", self.base_url);
+
+        let mut body = scope.body_fields();
+        body["payer"] = serde_json::json!(payer);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", wallet_key))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to prepare the agent secret delete")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to prepare the agent secret delete ({status}): {text}");
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse the prepared delete call")
     }
 
     // ── Vault init helpers ─────────────────────────────────────────────
@@ -940,6 +998,12 @@ pub struct AddGeneratedSecretResponse {
     pub encrypted_data_base64: String,
     #[allow(dead_code)]
     pub all_keys: Vec<String>,
+    /// The accessor as the keystore reads it — carrying `repo_normalized` for
+    /// the same reason [`SecretsPubkey`] does. This flow never calls the pubkey
+    /// endpoint when there is nothing to encrypt by hand, so it is the only
+    /// place the normalised spelling can come from.
+    #[serde(default)]
+    pub accessor: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1044,6 +1108,108 @@ pub struct PaymentCheckPeekResponse {
     pub expires_at: Option<String>,
 }
 
+/// What an agent's secret is stored against.
+///
+/// A project secret is readable by every version of that project; a
+/// `wasm_hash` secret is readable only by that exact build. They seal to
+/// DIFFERENT seeds, so the choice made when storing is the one that must
+/// be made when reading — which is why it travels as one value rather
+/// than as two optional strings that could both be set, or neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentSecretScope {
+    Project(String),
+    WasmHash(String),
+}
+
+impl AgentSecretScope {
+    /// Exactly one of `--project` and `--wasm-hash`.
+    pub fn from_flags(project: Option<String>, wasm_hash: Option<String>) -> Result<Self> {
+        let project = project.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let hash = wasm_hash.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+        match (project, hash) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "Give either --project or --wasm-hash, not both. A secret is sealed to one \
+                 scope, and the two seal it differently."
+            ),
+            (Some(p), None) => Ok(Self::Project(p)),
+            // LOWER CASE: hex has two spellings and the chain stores one. A
+            // hash pasted from a tool that shouts would otherwise seal the
+            // secret to a seed nothing rebuilds.
+            (None, Some(h)) => Ok(Self::WasmHash(h.to_lowercase())),
+            (None, None) => anyhow::bail!(
+                "--project or --wasm-hash is required: a secret is stored against the \
+                 connector's project, or against one exact WASM hash."
+            ),
+        }
+    }
+
+    /// The seed the coordinator will name — `project:{id}:{agent}` or
+    /// `wasm_hash:{hash}:{agent}`. Rebuilt here so that a key answered
+    /// for a different secret is a refusal rather than a silent
+    /// mis-seal.
+    pub fn seed(&self, agent_account: &str) -> String {
+        match self {
+            Self::Project(project_id) => format!("project:{}:{}", project_id, agent_account),
+            Self::WasmHash(hash) => format!("wasm_hash:{}:{}", hash, agent_account),
+        }
+    }
+
+    /// The accessor the prepared call must carry, in the contract's own
+    /// JSON. Anything else means the call stores somewhere we did not ask
+    /// for.
+    pub fn accessor_json(&self) -> Value {
+        match self {
+            Self::Project(project_id) => {
+                serde_json::json!({ "Project": { "project_id": project_id } })
+            }
+            Self::WasmHash(hash) => serde_json::json!({ "WasmHash": { "hash": hash } }),
+        }
+    }
+
+    /// As a query parameter for the pubkey endpoint.
+    pub fn query_pair(&self) -> (&'static str, &str) {
+        match self {
+            Self::Project(project_id) => ("project_id", project_id.as_str()),
+            Self::WasmHash(hash) => ("wasm_hash", hash.as_str()),
+        }
+    }
+
+    /// As the body fields the POST endpoints take.
+    pub fn body_fields(&self) -> Value {
+        let (key, value) = self.query_pair();
+        serde_json::json!({ key: value })
+    }
+
+    /// For a message a human reads.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Project(project_id) => project_id.clone(),
+            Self::WasmHash(hash) => format!("wasm {hash}"),
+        }
+    }
+}
+
+/// The answer to `/secrets/pubkey`: the key to encrypt to, and — for a
+/// repository — the spelling the rest of the system uses.
+///
+/// **The normalised repo is not decoration.** The keystore normalises a
+/// repository URL before it asks the CONTRACT for a secret
+/// (`accessor_to_contract_json`), so a secret stored under the spelling a
+/// person typed — `https://github.com/a/b`, `git@github.com:a/b` — is one the
+/// reader never asks for. It stores, it encrypts to the right key, and it is
+/// never found at run time. Taking the normalised form from this answer is how
+/// the dashboard has always avoided that, and now how this does: one authority
+/// for the rule, which lives in the keystore.
+#[derive(Debug, Clone)]
+pub struct SecretsPubkey {
+    /// X25519 public key, hex. Encrypt-only.
+    pub pubkey: String,
+    /// The repository as the keystore spells it. `None` for the accessors that
+    /// have nothing to normalise.
+    pub repo_normalized: Option<String>,
+}
+
 /// What to seal a secret to, and the name it will be stored under.
 #[derive(Debug, Deserialize)]
 pub struct AgentSecretPubkey {
@@ -1071,6 +1237,20 @@ pub struct PreparedAgentSecret {
     pub args: Value,
     /// Attached deposit in yoctoNEAR; the contract refunds the excess.
     pub deposit: String,
+    pub gas: String,
+    pub agent_account: String,
+}
+
+/// A `delete_agent_secret` call, ready for the payer to send.
+///
+/// No deposit: the method is not payable, and the storage stake travels
+/// the other way — back to whoever sends this.
+#[derive(Debug, Deserialize)]
+pub struct PreparedAgentSecretDelete {
+    pub contract_id: String,
+    pub method_name: String,
+    /// Complete JSON arguments, including the agent wallet's signature.
+    pub args: Value,
     pub gas: String,
     pub agent_account: String,
 }

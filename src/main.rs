@@ -284,9 +284,14 @@ enum SecretsCommands {
         secrets: String,
 
         /// The connector's project (owner/name), as reported by
-        /// `GET /subscription/status`
+        /// `GET /subscription/status`. Use this or --wasm-hash.
         #[arg(long)]
-        project: String,
+        project: Option<String>,
+
+        /// One exact build instead of a project: the secret is then
+        /// readable only by that WASM, and a rebuild cannot open it
+        #[arg(long)]
+        wasm_hash: Option<String>,
 
         /// Agent wallet key (wk_...). Defaults to $OUTLAYER_WALLET_KEY
         #[arg(long)]
@@ -304,6 +309,24 @@ enum SecretsCommands {
         /// agent's wallet needs no NEAR at all.
         #[arg(long)]
         agent_pays: bool,
+    },
+    /// Remove the secret left for an agent, and take the storage deposit back
+    DeleteForAgent {
+        /// The connector's project (owner/name). Use this or --wasm-hash.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// One exact build instead of a project
+        #[arg(long)]
+        wasm_hash: Option<String>,
+
+        /// Agent wallet key (wk_...). Defaults to $OUTLAYER_WALLET_KEY
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Skip the confirmation. For scripts — the delete cannot be undone
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Update secrets (preserves PROTECTED_*, merges with existing)
     Update {
@@ -741,6 +764,7 @@ async fn main() -> anyhow::Result<()> {
                 SecretsCommands::SetForAgent {
                     secrets,
                     project,
+                    wasm_hash,
                     api_key,
                     vault_id,
                     agent_pays,
@@ -748,10 +772,24 @@ async fn main() -> anyhow::Result<()> {
                     commands::secrets::set_for_agent(
                         &network,
                         secrets,
-                        project,
+                        outlayer_cli::api::AgentSecretScope::from_flags(project, wasm_hash)?,
                         api_key.as_deref(),
                         vault_id,
                         agent_pays,
+                    )
+                    .await?
+                }
+                SecretsCommands::DeleteForAgent {
+                    project,
+                    wasm_hash,
+                    api_key,
+                    yes,
+                } => {
+                    commands::secrets::delete_for_agent(
+                        &network,
+                        outlayer_cli::api::AgentSecretScope::from_flags(project, wasm_hash)?,
+                        api_key.as_deref(),
+                        yes,
                     )
                     .await?
                 }

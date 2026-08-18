@@ -61,8 +61,9 @@ pub async fn create(network: &NetworkConfig) -> Result<()> {
         .await
         .context("Failed to get keystore pubkey")?;
 
-    // Encrypt
-    let encrypted = crypto::encrypt_secrets(&pubkey, &secrets_json)?;
+    // Encrypt. A payment key is a `System` accessor — nothing to normalise, so
+    // only the key itself is taken from the answer.
+    let encrypted = crypto::encrypt_secrets(&pubkey.pubkey, &secrets_json)?;
 
     let api_key = format!("{}:{}:{}", creds.account_id, nonce, secret);
 
