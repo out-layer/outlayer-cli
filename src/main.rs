@@ -267,9 +267,12 @@ enum SecretsCommands {
         #[arg(long)]
         generate: Vec<String>,
 
-        /// Access control: allow-all (default), whitelist:acc1,acc2
-        #[arg(long, default_value = "allow-all")]
-        access: String,
+        /// Who may read: allow-all, or whitelist:acc1,acc2 — an entry may carry a
+        /// deadline, acc@2026-10-01T00:00:00Z. Omitted: a row that exists keeps
+        /// its condition; a new project row admits only you; a new repo/hash row
+        /// admits everyone.
+        #[arg(long)]
+        access: Option<String>,
 
         /// Bind the secret to a per-customer vault account. The
         /// keystore decrypts via the per-vault master derived from
@@ -359,6 +362,33 @@ enum SecretsCommands {
     },
     /// List stored secrets (metadata only)
     List,
+    /// Change who may read a stored secret; the ciphertext stays
+    Access {
+        /// Secrets profile name
+        #[arg(long, default_value = "default")]
+        profile: String,
+
+        /// Project accessor (owner/name)
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Repository accessor
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Branch (use with --repo)
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// WASM hash accessor
+        #[arg(long)]
+        wasm_hash: Option<String>,
+
+        /// The new condition: allow-all, or whitelist:acc1,acc2 with optional
+        /// acc@deadline entries (UTC, YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DD)
+        #[arg(long)]
+        access: String,
+    },
     /// Delete secrets for a profile
     Delete {
         /// Secrets profile name
@@ -756,7 +786,7 @@ async fn main() -> anyhow::Result<()> {
                         branch,
                         wasm_hash,
                         generate,
-                        &access,
+                        access.as_deref(),
                         vault_id,
                     )
                     .await?
@@ -816,6 +846,26 @@ async fn main() -> anyhow::Result<()> {
                     .await?
                 }
                 SecretsCommands::List => commands::secrets::list(&network).await?,
+                SecretsCommands::Access {
+                    profile,
+                    project,
+                    repo,
+                    branch,
+                    wasm_hash,
+                    access,
+                } => {
+                    commands::secrets::access(
+                        &network,
+                        project_config.as_ref(),
+                        &profile,
+                        project,
+                        repo,
+                        branch,
+                        wasm_hash,
+                        &access,
+                    )
+                    .await?
+                }
                 SecretsCommands::Delete {
                     profile,
                     project,

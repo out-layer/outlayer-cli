@@ -113,6 +113,7 @@ outlayer projects bob.near
 |---------|-------------|
 | `outlayer secrets set '{"KEY":"val"}'` | Encrypt and store secrets |
 | `outlayer secrets set-for-agent '{"KEY":"val"}' --project <owner>/<name>` | Leave a secret for an agent to use with one connector |
+| `outlayer secrets access --project <owner>/<name> --profile <p> --access <cond>` | Change who may read a stored secret (`update_access`); grant or revoke an agent without re-storing |
 | `outlayer secrets update '{"KEY":"val"}'` | Merge with existing (preserves PROTECTED_*) |
 | `outlayer secrets set --generate PROTECTED_X:hex32` | Generate protected secret in TEE |
 | `outlayer secrets list` | List stored secrets (metadata only) |
@@ -130,8 +131,12 @@ outlayer secrets set --generate PROTECTED_MASTER_KEY:hex32
 outlayer secrets set '{"API_KEY":"sk-..."}' --generate PROTECTED_DB:hex64   # mixed
 
 # Access control
-outlayer secrets set '{"KEY":"val"}' --access allow-all                      # default
+outlayer secrets set '{"KEY":"val"}' --access allow-all                      # everyone who names it
 outlayer secrets set '{"KEY":"val"}' --access whitelist:alice.near,bob.near
+outlayer secrets set '{"KEY":"val"}' --access whitelist:me.near,agent@2026-10-01T00:00:00Z   # a grant that lapses
+outlayer secrets access --project me.near/app --profile default --access whitelist:me.near    # change who may read; the value stays
+# Without --access: a row that exists keeps its condition; a new project row admits only you;
+# a new repository- or hash-bound row admits everyone.
 
 # Update (merge with existing, preserves all PROTECTED_* variables)
 outlayer secrets update '{"NEW_KEY":"val"}' --project alice.near/my-agent

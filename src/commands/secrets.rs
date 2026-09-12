@@ -152,19 +152,151 @@ fn resolve_accessor(
 fn parse_access(access_str: &str) -> Result<Value> {
     match access_str {
         "allow-all" | "AllowAll" => Ok(json!("AllowAll")),
-        s if s.starts_with("whitelist:") => {
-            let accounts: Vec<&str> = s["whitelist:".len()..].split(',').collect();
-            if accounts.is_empty() || accounts.iter().any(|a| a.is_empty()) {
-                anyhow::bail!(
-                    "Whitelist requires at least one account. \
-                     Use: --access whitelist:alice.near,bob.near"
-                );
-            }
-            Ok(json!({ "Whitelist": accounts }))
-        }
+        s if s.starts_with("whitelist:") => parse_whitelist(&s["whitelist:".len()..]),
         other => anyhow::bail!(
-            "Unknown access type: '{other}'. Use: allow-all, whitelist:acc1,acc2"
+            "Unknown access type: '{other}'. Use: allow-all, whitelist:acc1,acc2 — an entry may \
+             carry a deadline, acc@2026-10-01T00:00:00Z, after which it no longer admits"
         ),
+    }
+}
+
+/// `a.near,b.near@2026-10-01T00:00:00Z,c.near@1790000000` → the contract's
+/// condition. Entries without a deadline form one `Whitelist`; each entry with
+/// one becomes `And[Whitelist[entry], ValidUntil(deadline)]`, and the groups are
+/// joined with `Or`. A single group is written bare.
+fn parse_whitelist(list: &str) -> Result<Value> {
+    let entries: Vec<&str> = list.split(',').collect();
+    if entries.is_empty() || entries.iter().any(|e| e.trim().is_empty()) {
+        anyhow::bail!(
+            "Whitelist requires at least one account. Use: --access whitelist:alice.near,bob.near"
+        );
+    }
+    let mut open: Vec<&str> = Vec::new();
+    let mut groups: Vec<Value> = Vec::new();
+    for entry in entries {
+        match entry.split_once('@') {
+            None => open.push(entry.trim()),
+            Some((account, deadline)) => {
+                let account = account.trim();
+                if account.is_empty() {
+                    anyhow::bail!("'{entry}': the account before '@' is empty");
+                }
+                let until_ns = parse_deadline(deadline.trim())
+                    .with_context(|| format!("'{entry}': the deadline after '@' is not a date"))?;
+                groups.push(json!({ "Logic": { "operator": "And", "conditions": [
+                    whitelist_of(&[account]),
+                    { "ValidUntil": { "until_ns": until_ns.to_string() } }
+                ]}}));
+            }
+        }
+    }
+    if !open.is_empty() {
+        groups.insert(0, whitelist_of(&open));
+    }
+    Ok(if groups.len() == 1 {
+        groups.remove(0)
+    } else {
+        json!({ "Logic": { "operator": "Or", "conditions": groups } })
+    })
+}
+
+fn whitelist_of(accounts: &[&str]) -> Value {
+    json!({ "Whitelist": { "accounts": accounts } })
+}
+
+/// A deadline as nanoseconds since the epoch. Accepts `YYYY-MM-DD`,
+/// `YYYY-MM-DDTHH:MM:SSZ` (UTC only — a local time would mean a different
+/// instant on every machine) or plain seconds since the epoch.
+fn parse_deadline(text: &str) -> Result<u64> {
+    if let Ok(secs) = text.parse::<u64>() {
+        return secs
+            .checked_mul(1_000_000_000)
+            .context("the deadline is too far in the future");
+    }
+    let (date, time) = match text.split_once('T') {
+        Some((d, t)) => (d, t.strip_suffix('Z').context("the time must end in 'Z' (UTC)")?),
+        None => (text, "00:00:00"),
+    };
+    let mut ymd = date.split('-').map(|p| p.parse::<i64>());
+    let (y, m, d) = match (ymd.next(), ymd.next(), ymd.next(), ymd.next()) {
+        (Some(Ok(y)), Some(Ok(m)), Some(Ok(d)), None) => (y, m, d),
+        _ => anyhow::bail!("expected YYYY-MM-DD, got '{date}'"),
+    };
+    let mut hms = time.split(':').map(|p| p.parse::<i64>());
+    let (h, mi, sec) = match (hms.next(), hms.next(), hms.next(), hms.next()) {
+        (Some(Ok(h)), Some(Ok(mi)), Some(Ok(s)), None) => (h, mi, s),
+        _ => anyhow::bail!("expected HH:MM:SS, got '{time}'"),
+    };
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(0..24).contains(&h) || !(0..60).contains(&mi) || !(0..60).contains(&sec) {
+        anyhow::bail!("'{text}' is not a calendar date and time");
+    }
+    let days = days_from_civil(y, m, d);
+    // `1..=31` admits 2026-02-30; the round trip does not. A deadline that rolls
+    // into the next month would lapse later than the owner wrote.
+    if civil_from_days(days) != (y, m, d) {
+        anyhow::bail!("'{text}' is not a calendar date");
+    }
+    let secs = days * 86_400 + h * 3_600 + mi * 60 + sec;
+    if secs < 0 {
+        anyhow::bail!("'{text}' is before 1970");
+    }
+    (secs as u64)
+        .checked_mul(1_000_000_000)
+        .context("the deadline is too far in the future")
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date, after Howard Hinnant.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * m + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The inverse of [`days_from_civil`]: `(year, month, day)`.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// The condition a row is stored under right now, or `None` when there is no
+/// such row. Read from the chain, since that is where it lives.
+async fn stored_access(
+    near: &NearClient,
+    accessor_contract: &Value,
+    profile: &str,
+    owner: &str,
+) -> Result<Option<Value>> {
+    let row: Option<Value> = near
+        .view_call(
+            "get_secrets",
+            json!({ "accessor": accessor_contract, "profile": profile, "owner": owner }),
+        )
+        .await
+        .context("Failed to read the stored secret's access condition")?;
+    Ok(row.and_then(|r| r.get("access").cloned()))
+}
+
+/// What `set` stores a row under when the caller gave no `--access`: the
+/// condition it already has, so a rotation never changes who may read; for a
+/// new row under a project, the signer alone — a personal secret is readable
+/// by whoever names it only if its owner says so; for a new repository- or
+/// hash-bound row, everyone, as those rows are an app's own.
+fn default_access(existing: Option<Value>, accessor_contract: &Value, owner: &str) -> (Value, &'static str) {
+    match existing {
+        Some(access) => (access, "kept the stored condition"),
+        None if accessor_contract.get("Project").is_some() => (whitelist_of(&[owner]), "new project row: only you"),
+        None => (json!("AllowAll"), "new row: everyone"),
     }
 }
 
@@ -226,13 +358,13 @@ pub async fn set(
     branch: Option<String>,
     wasm_hash: Option<String>,
     generate: Vec<String>,
-    access_str: &str,
+    access_str: Option<&str>,
     vault_id: Option<String>,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
 
     let mut accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
-    let access = parse_access(access_str)?;
+    let explicit_access = access_str.map(parse_access).transpose()?;
     let generate_specs = parse_generate_specs(generate)?;
 
     let secrets_map = match &secrets_json {
@@ -245,6 +377,23 @@ pub async fn set(
     }
 
     let api = ApiClient::new(network);
+
+    // The condition: what was asked for, else what the row already has, else
+    // the default for a row of this kind. Decided before anything is encrypted
+    // or generated in the TEE — a chain that cannot be read then costs the
+    // caller nothing and no generated key is made to be thrown away. The
+    // accessor takes its canonical spelling first, so the row read here is the
+    // row written below.
+    let access = match explicit_access {
+        Some(access) => access,
+        None => {
+            canonicalize_repo(&api, &mut accessor, &creds.account_id, profile, vault_id.as_deref()).await?;
+            let existing = stored_access(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?;
+            let (access, why) = default_access(existing, &accessor.contract, &creds.account_id);
+            eprintln!("Access: {} ({why}; pass --access to choose)", format_access(&access));
+            access
+        }
+    };
 
     let encrypted_data = if generate_specs.is_empty() {
         // Simple flow: encrypt manually, no TEE generation
@@ -459,6 +608,15 @@ pub async fn update(
     // unlike `set` there is no accessor in the reply to take it from.
     canonicalize_repo(&api, &mut accessor, &creds.account_id, profile, None).await?;
 
+    // The merged row keeps the condition it had. An update changes values, not
+    // who may read them — re-storing under a default would silently widen a
+    // whitelisted row or narrow an app's AllowAll credential. Read before the
+    // TEE merges anything: a row that is not there, or a chain that cannot be
+    // read, stops here at no cost.
+    let access = stored_access(&NearClient::new(network), &accessor.contract, profile, &creds.account_id)
+        .await?
+        .context("no such secret to update — store it with `outlayer secrets set` first")?;
+
     eprintln!("Updating secrets...");
     let response = api
         .update_user_secrets(&json!({
@@ -489,7 +647,7 @@ pub async fn update(
                 "accessor": accessor.contract,
                 "profile": profile,
                 "encrypted_secrets_base64": response.encrypted_secrets_base64,
-                "access": "AllowAll",
+                "access": access,
                 // Re-store flow preserves the existing vault binding
                 // (`null` = no-op on the side-table per
                 // the contract's documented semantics, see
@@ -512,6 +670,53 @@ pub async fn update(
     }
     eprintln!("Secrets updated (profile: {profile}, {})", parts.join("; "));
 
+    Ok(())
+}
+
+// ── Access ───────────────────────────────────────────────────────────
+
+/// `outlayer secrets access --access ... [--project|--repo|--wasm-hash]` —
+/// change who may read a stored secret. The ciphertext stays; only the
+/// condition moves, through the contract's `update_access`. This is how an
+/// owner grants an agent (`whitelist:me.near,<agent>@<deadline>`) and how they
+/// take it back.
+#[allow(clippy::too_many_arguments)]
+pub async fn access(
+    network: &NetworkConfig,
+    project_config: Option<&ProjectConfig>,
+    profile: &str,
+    project: Option<String>,
+    repo: Option<String>,
+    branch: Option<String>,
+    wasm_hash: Option<String>,
+    access_str: &str,
+) -> Result<()> {
+    let creds = config::load_credentials(network)?;
+    let new_access = parse_access(access_str)?;
+
+    let mut accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
+    canonicalize_repo(&ApiClient::new(network), &mut accessor, &creds.account_id, profile, None).await?;
+
+    if stored_access(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?.is_none() {
+        anyhow::bail!("no such secret (profile: {profile}) — nothing to change the access of");
+    }
+
+    let caller = ContractCaller::from_credentials(&creds, network)?;
+    caller
+        .call_contract(
+            "update_access",
+            json!({
+                "accessor": accessor.contract,
+                "profile": profile,
+                "new_access": new_access,
+            }),
+            30_000_000_000_000u64,
+            0,
+        )
+        .await
+        .context("Failed to update the access condition")?;
+
+    eprintln!("Access updated (profile: {profile}): {}", format_access(&new_access));
     Ok(())
 }
 
@@ -1047,18 +1252,109 @@ fn format_accessor(accessor: &Value) -> String {
     accessor.to_string()
 }
 
+/// A condition as a person reads it: the `--access` spelling wherever the
+/// tree is one `parse_access` writes (`allow-all`, `whitelist:a,b@<deadline>`),
+/// the structure in words otherwise — so `list` and every confirmation line
+/// show what `--access` would take to reproduce the row.
 fn format_access(access: &Value) -> String {
-    if access.is_string() && access.as_str() == Some("AllowAll") {
-        return "AllowAll".to_string();
+    if let Some(spelling) = whitelist_spelling(access) {
+        return spelling;
     }
-    if let Some(obj) = access.as_object() {
-        if let Some(wl) = obj.get("Whitelist") {
-            if let Some(arr) = wl.as_array() {
-                return format!("Whitelist({})", arr.len());
-            }
+    match access.as_str() {
+        Some("AllowAll") => return "allow-all".to_string(),
+        Some(other) => return other.to_string(),
+        None => {}
+    }
+    let Some(obj) = access.as_object() else {
+        return access.to_string();
+    };
+    if let Some(until) = obj.get("ValidUntil").and_then(|v| v.get("until_ns")) {
+        return format!("until {}", format_deadline(until));
+    }
+    if let Some(logic) = obj.get("Logic") {
+        let joiner = match logic.get("operator").and_then(Value::as_str) {
+            Some("And") => " and ",
+            _ => " or ",
+        };
+        let parts: Vec<String> = logic
+            .get("conditions")
+            .and_then(Value::as_array)
+            .map(|c| c.iter().map(format_access).collect())
+            .unwrap_or_default();
+        return format!("({})", parts.join(joiner));
+    }
+    if let Some(not) = obj.get("Not") {
+        return format!("not {}", format_access(not.get("condition").unwrap_or(&Value::Null)));
+    }
+    if let Some(pattern) = obj.get("AccountPattern").and_then(|p| p.get("pattern")).and_then(Value::as_str) {
+        return format!("pattern:{pattern}");
+    }
+    for chain_answered in ["NearBalance", "FtBalance", "NftOwned", "DaoMember"] {
+        if let Some(inner) = obj.get(chain_answered) {
+            return format!("{chain_answered}{inner}");
         }
     }
     access.to_string()
+}
+
+/// The inverse of [`parse_whitelist`]: `Some(spelling)` when the tree is one
+/// it writes — a whitelist, a dated grant, or an `Or` of those — else `None`.
+fn whitelist_spelling(access: &Value) -> Option<String> {
+    fn accounts_of(v: &Value) -> Option<Vec<&str>> {
+        v.get("Whitelist")?.get("accounts")?.as_array()?.iter().map(Value::as_str).collect()
+    }
+    fn dated_of(v: &Value) -> Option<String> {
+        let logic = v.get("Logic")?;
+        if logic.get("operator")?.as_str()? != "And" {
+            return None;
+        }
+        let parts = logic.get("conditions")?.as_array()?;
+        if parts.len() != 2 {
+            return None;
+        }
+        let accounts = accounts_of(&parts[0])?;
+        if accounts.len() != 1 {
+            return None;
+        }
+        let until = parts[1].get("ValidUntil")?.get("until_ns")?;
+        Some(format!("{}@{}", accounts[0], format_deadline(until)))
+    }
+    if let Some(accounts) = accounts_of(access) {
+        return Some(format!("whitelist:{}", accounts.join(",")));
+    }
+    if let Some(dated) = dated_of(access) {
+        return Some(format!("whitelist:{dated}"));
+    }
+    let logic = access.get("Logic")?;
+    if logic.get("operator")?.as_str()? != "Or" {
+        return None;
+    }
+    let mut entries: Vec<String> = Vec::new();
+    for part in logic.get("conditions")?.as_array()? {
+        if let Some(accounts) = accounts_of(part) {
+            entries.extend(accounts.iter().map(|a| a.to_string()));
+        } else {
+            entries.push(dated_of(part)?);
+        }
+    }
+    Some(format!("whitelist:{}", entries.join(",")))
+}
+
+/// `until_ns` as the contract writes it (a decimal string of nanoseconds) →
+/// `YYYY-MM-DDTHH:MM:SSZ`; anything unreadable is shown as it is.
+fn format_deadline(until_ns: &Value) -> String {
+    let ns = match until_ns {
+        Value::String(s) => s.parse::<u64>().ok(),
+        Value::Number(n) => n.as_u64(),
+        _ => None,
+    };
+    let Some(ns) = ns else {
+        return until_ns.to_string();
+    };
+    let secs = (ns / 1_000_000_000) as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3_600, (rem % 3_600) / 60, rem % 60)
 }
 
 #[cfg(test)]
@@ -1490,5 +1786,100 @@ mod repo_normalization_tests {
             wasm.contract, before_wasm,
             "a WASM accessor has no repo to re-spell",
         );
+    }
+}
+
+#[cfg(test)]
+mod access_parsing_tests {
+    use super::*;
+
+    /// The contract's shape: a struct variant with `accounts`, never a bare array.
+    #[test]
+    fn a_whitelist_is_the_contracts_struct_variant() {
+        assert_eq!(
+            parse_access("whitelist:alice.near,bob.near").unwrap(),
+            json!({ "Whitelist": { "accounts": ["alice.near", "bob.near"] } })
+        );
+        assert_eq!(parse_access("allow-all").unwrap(), json!("AllowAll"));
+        assert!(parse_access("whitelist:").is_err());
+        assert!(parse_access("whitelist:a.near,").is_err());
+        assert!(parse_access("friends").is_err());
+    }
+
+    /// Dated entries become their own `And[Whitelist, ValidUntil]`, joined by
+    /// `Or` with the undated ones; a lone group is written bare.
+    #[test]
+    fn dated_entries_compose_into_the_grant_tree() {
+        let tree = parse_access("whitelist:me.near,agent.near@2026-10-01T00:00:00Z").unwrap();
+        assert_eq!(
+            tree,
+            json!({ "Logic": { "operator": "Or", "conditions": [
+                { "Whitelist": { "accounts": ["me.near"] } },
+                { "Logic": { "operator": "And", "conditions": [
+                    { "Whitelist": { "accounts": ["agent.near"] } },
+                    { "ValidUntil": { "until_ns": "1790812800000000000" } }
+                ]}}
+            ]}})
+        );
+        let lone = parse_access("whitelist:agent.near@1790812800").unwrap();
+        assert_eq!(lone["Logic"]["operator"], "And", "one dated entry is the And itself");
+        assert!(parse_access("whitelist:@2026-10-01").is_err(), "an empty account is refused");
+        assert!(parse_access("whitelist:a.near@soon").is_err(), "a non-date is refused");
+    }
+
+    #[test]
+    fn deadlines_read_as_utc_instants() {
+        assert_eq!(parse_deadline("1970-01-01").unwrap(), 0);
+        assert_eq!(parse_deadline("2023-11-14T22:13:20Z").unwrap(), 1_700_000_000_000_000_000);
+        assert_eq!(parse_deadline("2000-02-29").unwrap(), 951_782_400_000_000_000, "a leap day");
+        assert_eq!(parse_deadline("1700000000").unwrap(), 1_700_000_000_000_000_000);
+        assert!(parse_deadline("2026-10-01T00:00:00").is_err(), "a time without Z is ambiguous");
+        assert!(parse_deadline("2026-13-01").is_err());
+        assert!(parse_deadline("1969-12-31").is_err());
+        assert!(parse_deadline("2026-02-30").is_err(), "February has no 30th");
+        assert!(parse_deadline("2026-02-29").is_err(), "2026 is not a leap year");
+        assert!(parse_deadline("2026-04-31").is_err());
+        assert!(parse_deadline("2024-02-29").is_ok(), "2024 is");
+        assert_eq!(civil_from_days(days_from_civil(2023, 11, 14)), (2023, 11, 14));
+    }
+
+    /// No `--access`: an existing row keeps its condition; a new project row is
+    /// the signer's alone; a new repo or hash row is everyone's.
+    #[test]
+    fn the_default_follows_the_row() {
+        let project = json!({ "Project": { "project_id": "me.near/app" } });
+        let repo = json!({ "Repo": { "repo": "github.com/x/y", "branch": null } });
+        let kept = json!({ "Whitelist": { "accounts": ["other.near"] } });
+        assert_eq!(default_access(Some(kept.clone()), &project, "me.near").0, kept);
+        assert_eq!(
+            default_access(None, &project, "me.near").0,
+            json!({ "Whitelist": { "accounts": ["me.near"] } })
+        );
+        assert_eq!(default_access(None, &repo, "me.near").0, json!("AllowAll"));
+    }
+
+    /// What `list` prints is what `--access` takes: the spelling round-trips
+    /// for every shape the CLI writes, and the contract's struct-variant
+    /// whitelist is rendered as a whitelist, not as raw JSON.
+    #[test]
+    fn a_stored_condition_is_shown_as_its_access_spelling() {
+        for spelling in [
+            "allow-all",
+            "whitelist:alice.near,bob.near",
+            "whitelist:me.near,agent.near@2026-10-01T00:00:00Z",
+            "whitelist:agent.near@2026-10-01T00:00:00Z",
+            "whitelist:a.near@2026-10-01T00:00:00Z,b.near@2027-01-01T12:30:00Z",
+        ] {
+            assert_eq!(format_access(&parse_access(spelling).unwrap()), spelling);
+        }
+        assert_eq!(
+            format_access(&json!({ "Whitelist": { "accounts": ["alice.near"] } })),
+            "whitelist:alice.near"
+        );
+        let hand_written = json!({ "Logic": { "operator": "And", "conditions": [
+            { "AccountPattern": { "pattern": ".*\\.near" } },
+            { "Not": { "condition": { "ValidUntil": { "until_ns": "0" } } } }
+        ]}});
+        assert_eq!(format_access(&hand_written), "(pattern:.*\\.near and not until 1970-01-01T00:00:00Z)");
     }
 }
