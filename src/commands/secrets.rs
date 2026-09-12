@@ -160,7 +160,7 @@ fn parse_access(access_str: &str) -> Result<Value> {
     }
 }
 
-/// `a.near,b.near@2026-10-01T00:00:00Z,c.near@1790000000` → the contract's
+/// `a.near,b.near@2026-10-01T00:00:00Z` → the contract's
 /// condition. Entries without a deadline form one `Whitelist`; each entry with
 /// one becomes `And[Whitelist[entry], ValidUntil(deadline)]`, and the groups are
 /// joined with `Or`. A single group is written bare.
@@ -204,14 +204,21 @@ fn whitelist_of(accounts: &[&str]) -> Value {
     json!({ "Whitelist": { "accounts": accounts } })
 }
 
-/// A deadline as nanoseconds since the epoch. Accepts `YYYY-MM-DD`,
-/// `YYYY-MM-DDTHH:MM:SSZ` (UTC only — a local time would mean a different
-/// instant on every machine) or plain seconds since the epoch.
+/// A deadline as nanoseconds since the epoch. Exactly two spellings, both UTC:
+/// `YYYY-MM-DD` and `YYYY-MM-DDTHH:MM:SSZ`. A local time is refused because it
+/// would mean a different instant on every machine.
+///
+/// A bare number is refused rather than read as epoch seconds. `20261001` parses
+/// as a number, and taking it that way would silently mean August 1970 to
+/// somebody who meant 2026-10-01: the grant would be born expired, and the
+/// refusal would blame a limit in 1970.
 fn parse_deadline(text: &str) -> Result<u64> {
-    if let Ok(secs) = text.parse::<u64>() {
-        return secs
-            .checked_mul(1_000_000_000)
-            .context("the deadline is too far in the future");
+    if text.is_empty() || text.chars().all(|c| c.is_ascii_digit()) {
+        anyhow::bail!(
+            "'{text}' is not a date: write it as 2026-10-01 or 2026-10-01T00:00:00Z (UTC). \
+             A bare number is not read as epoch seconds, because 20261001 would silently \
+             mean August 1970 to somebody who meant 2026-10-01"
+        );
     }
     let (date, time) = match text.split_once('T') {
         Some((d, t)) => (d, t.strip_suffix('Z').context("the time must end in 'Z' (UTC)")?),
@@ -1821,7 +1828,7 @@ mod access_parsing_tests {
                 ]}}
             ]}})
         );
-        let lone = parse_access("whitelist:agent.near@1790812800").unwrap();
+        let lone = parse_access("whitelist:agent.near@2026-10-01T00:00:00Z").unwrap();
         assert_eq!(lone["Logic"]["operator"], "And", "one dated entry is the And itself");
         assert!(parse_access("whitelist:@2026-10-01").is_err(), "an empty account is refused");
         assert!(parse_access("whitelist:a.near@soon").is_err(), "a non-date is refused");
@@ -1832,8 +1839,14 @@ mod access_parsing_tests {
         assert_eq!(parse_deadline("1970-01-01").unwrap(), 0);
         assert_eq!(parse_deadline("2023-11-14T22:13:20Z").unwrap(), 1_700_000_000_000_000_000);
         assert_eq!(parse_deadline("2000-02-29").unwrap(), 951_782_400_000_000_000, "a leap day");
-        assert_eq!(parse_deadline("1700000000").unwrap(), 1_700_000_000_000_000_000);
         assert!(parse_deadline("2026-10-01T00:00:00").is_err(), "a time without Z is ambiguous");
+        // A bare number is refused, and the refusal names both spellings. Read as
+        // epoch seconds, `20261001` would mean August 1970 to somebody who meant
+        // 2026-10-01, and the grant would be born expired.
+        for bare in ["1700000000", "20261001", "2026", ""] {
+            let why = parse_deadline(bare).expect_err(bare).to_string();
+            assert!(why.contains("2026-10-01") && why.contains("2026-10-01T00:00:00Z"), "{why}");
+        }
         assert!(parse_deadline("2026-13-01").is_err());
         assert!(parse_deadline("1969-12-31").is_err());
         assert!(parse_deadline("2026-02-30").is_err(), "February has no 30th");
