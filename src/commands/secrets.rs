@@ -278,20 +278,29 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 
 /// The condition a row is stored under right now, or `None` when there is no
 /// such row. Read from the chain, since that is where it lives.
+async fn stored_row(
+    near: &NearClient,
+    accessor_contract: &Value,
+    profile: &str,
+    owner: &str,
+) -> Result<Option<Value>> {
+    near.view_call(
+        "get_secrets",
+        json!({ "accessor": accessor_contract, "profile": profile, "owner": owner }),
+    )
+    .await
+    .context("Failed to read the stored secret")
+}
+
 async fn stored_access(
     near: &NearClient,
     accessor_contract: &Value,
     profile: &str,
     owner: &str,
 ) -> Result<Option<Value>> {
-    let row: Option<Value> = near
-        .view_call(
-            "get_secrets",
-            json!({ "accessor": accessor_contract, "profile": profile, "owner": owner }),
-        )
-        .await
-        .context("Failed to read the stored secret's access condition")?;
-    Ok(row.and_then(|r| r.get("access").cloned()))
+    Ok(stored_row(near, accessor_contract, profile, owner)
+        .await?
+        .and_then(|r| r.get("access").cloned()))
 }
 
 /// What `set` stores a row under when the caller gave no `--access`: the
@@ -395,7 +404,25 @@ pub async fn set(
         Some(access) => access,
         None => {
             canonicalize_repo(&api, &mut accessor, &creds.account_id, profile, vault_id.as_deref()).await?;
-            let existing = stored_access(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?;
+            // `get_secrets` answers a branch-specific read with the WILDCARD row
+            // when no branch row exists, and echoes the accessor it actually
+            // found. Copying that condition onto a new branch row and calling it
+            // "kept" would be a lie: the wildcard row is a different row, and it
+            // keeps its own condition. Only a row at the very accessor about to
+            // be written counts as existing.
+            let row = stored_row(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?;
+            let existing = row.and_then(|r| {
+                let same_row = r.get("accessor").map(|a| a == &accessor.contract).unwrap_or(false);
+                if same_row {
+                    r.get("access").cloned()
+                } else {
+                    eprintln!(
+                        "Note: {profile} is stored under a different accessor ({}); this writes a NEW row.",
+                        r.get("accessor").map(|a| a.to_string()).unwrap_or_default()
+                    );
+                    None
+                }
+            });
             let (access, why) = default_access(existing, &accessor.contract, &creds.account_id);
             eprintln!("Access: {} ({why}; pass --access to choose)", format_access(&access));
             access
@@ -704,9 +731,57 @@ pub async fn access(
     let mut accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
     canonicalize_repo(&ApiClient::new(network), &mut accessor, &creds.account_id, profile, None).await?;
 
-    if stored_access(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?.is_none() {
+    let near = NearClient::new(network);
+    let Some(row) = stored_row(&near, &accessor.contract, profile, &creds.account_id).await? else {
         anyhow::bail!("no such secret (profile: {profile}) — nothing to change the access of");
+    };
+    // The read may have been answered by the wildcard row. `update_access` keys
+    // on the exact accessor, so pricing one row and editing another ends in
+    // `Secrets not found` after the user has already paid for a view.
+    if let Some(found) = row.get("accessor") {
+        if found != &accessor.contract {
+            anyhow::bail!(
+                "no secret at this accessor (profile: {profile}); {found} holds one, \
+                 and update_access edits the exact accessor it is given"
+            );
+        }
     }
+
+    // A condition is stored bytes, and the contract re-prices the row on every
+    // edit. Attaching the whole estimate is always enough: the deposit already
+    // held is credited towards it and the excess comes back in the same
+    // transaction, so widening asks only for the growth and narrowing refunds.
+    let ciphertext = row
+        .get("encrypted_secrets")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // `U128` reaches JSON as a decimal string, which is all this needs.
+    // A price that cannot be fetched must not block the edit. Narrowing a
+    // condition and swapping a name for one of equal length need no deposit at
+    // all, and those are exactly the edits an owner makes in a hurry — a revoke
+    // should not wait on a flaky view call. Sending nothing lets the contract
+    // decide: it refuses only genuine growth, and says how much it wanted.
+    let estimate: u128 = match near
+        .view_call::<String>(
+            "estimate_storage_cost",
+            json!({
+                "accessor": accessor.contract,
+                "profile": profile,
+                "owner": creds.account_id,
+                "encrypted_secrets_base64": ciphertext,
+                "access": new_access,
+                "vault_id": Value::Null,
+            }),
+        )
+        .await
+    {
+        Ok(quote) => quote.parse().unwrap_or(0),
+        Err(e) => {
+            eprintln!("Could not price this condition ({e}); sending without a deposit. \
+                       A condition that grows the row will be refused, saying what it costs.");
+            0
+        }
+    };
 
     let caller = ContractCaller::from_credentials(&creds, network)?;
     caller
@@ -718,7 +793,7 @@ pub async fn access(
                 "new_access": new_access,
             }),
             30_000_000_000_000u64,
-            0,
+            estimate,
         )
         .await
         .context("Failed to update the access condition")?;

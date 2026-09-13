@@ -324,22 +324,26 @@ payment_key_nonce = 1
 
 ## Testing
 
-Integration tests run against testnet. Requires `outlayer login testnet`.
+Integration tests run against testnet, spend testnet NEAR and take minutes,
+so they run only when asked for: set `OUTLAYER_LIVE_TESTS=1`. Without it every
+live test prints `SKIP` and `cargo test` stays fast. Requires `outlayer login
+testnet`. Run them before a release and after any change to the commands they
+cover.
 
 Execution tests auto-detect: if `TESTNET_PAYMENT_KEY` is set, calls go via HTTPS API; otherwise they use on-chain `request_execution` (costs ~0.002 NEAR per call).
 
 ```bash
 # Run all tests (on-chain mode — no payment key needed)
-cargo test --test integration -- --show-output
+OUTLAYER_LIVE_TESTS=1 cargo test --test integration -- --show-output
 
 # With payment key (HTTPS mode — faster, no NEAR cost)
-TESTNET_PAYMENT_KEY="owner:nonce:secret" cargo test --test integration -- --show-output
+TESTNET_PAYMENT_KEY="owner:nonce:secret" OUTLAYER_LIVE_TESTS=1 cargo test --test integration -- --show-output
 
 # Individual modules
-cargo test --test integration -- projects --show-output
-cargo test --test integration -- run --show-output
-cargo test --test integration -- secrets --show-output
-cargo test --test integration -- full_flow --show-output
+OUTLAYER_LIVE_TESTS=1 cargo test --test integration -- projects --show-output
+OUTLAYER_LIVE_TESTS=1 cargo test --test integration -- run --show-output
+OUTLAYER_LIVE_TESTS=1 cargo test --test integration -- secrets --show-output
+OUTLAYER_LIVE_TESTS=1 cargo test --test integration -- full_flow --show-output
 ```
 
 `--show-output` prints test logs (mode, tx hashes, results). Use `--nocapture` to see logs even for passing tests in real-time.

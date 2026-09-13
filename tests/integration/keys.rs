@@ -59,7 +59,7 @@ async fn test_payment_key_lifecycle() {
         .expect("get_secrets_pubkey failed");
 
     let encrypted =
-        crypto::encrypt_secrets(&pubkey, &secrets_json).expect("encrypt_secrets failed");
+        crypto::encrypt_secrets(&pubkey.pubkey, &secrets_json).expect("encrypt_secrets failed");
 
     // 4. Store on contract
     let deposit = 100_000_000_000_000_000_000_000u128; // 0.1 NEAR

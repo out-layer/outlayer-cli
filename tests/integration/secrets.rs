@@ -16,9 +16,11 @@ async fn test_secrets_lifecycle() {
 
     let project_id = format!("{}/test-secrets", ctx.account_id);
     let random_suffix = &crypto::generate_payment_key_secret()[..8];
-    let secret_name = format!("INTEG_SECRET_{}", random_suffix.to_uppercase());
+    // The example reports a fixed set of keys (`AUTHOR_SECRET`, `USER_SECRET`)
+    // with their values; a caller's row is read through `USER_SECRET`.
+    let secret_name = "USER_SECRET".to_string();
     let secret_value = format!("test_value_{random_suffix}");
-    let profile = "default".to_string();
+    let profile = format!("integ-{random_suffix}");
 
     let accessor_coordinator = json!({"type": "Project", "project_id": &project_id});
     let accessor_contract = json!({"Project": {"project_id": &project_id}});
@@ -40,7 +42,7 @@ async fn test_secrets_lifecycle() {
         .expect("get_secrets_pubkey failed");
 
     let encrypted =
-        crypto::encrypt_secrets(&pubkey, &secrets_json).expect("encrypt_secrets failed");
+        crypto::encrypt_secrets(&pubkey.pubkey, &secrets_json).expect("encrypt_secrets failed");
 
     // 2. Store on contract
     signer
@@ -84,10 +86,7 @@ async fn test_secrets_lifecycle() {
         .call_project_with_secrets(
             owner,
             project,
-            json!({
-                "command": "get_secret",
-                "key": &secret_name
-            }),
+            json!({ "message": "integration" }),
             Some(SecretsRef {
                 profile: profile.clone(),
                 account_id: ctx.account_id.clone(),
@@ -107,11 +106,15 @@ async fn test_secrets_lifecycle() {
     );
 
     // Verify the secret was found and value matches
-    assert_eq!(output["success"], true, "get_secret should succeed");
-    assert_eq!(output["found_count"], 1, "should find exactly 1 secret");
-
-    let secret_info = &output["secrets"][0];
-    assert_eq!(secret_info["key"], secret_name);
+    assert_eq!(output["success"], true, "the run should succeed");
+    assert_eq!(output["user"], true, "the caller's row should have reached the run");
+    // The author's row is reported too; find ours by name, never by position.
+    let secret_info = output["secrets"]
+        .as_array()
+        .expect("secrets is an array")
+        .iter()
+        .find(|s| s["key"] == secret_name)
+        .expect("USER_SECRET is reported");
     assert_eq!(secret_info["found"], true, "secret should be found");
     assert_eq!(
         secret_info["value"].as_str().unwrap(),

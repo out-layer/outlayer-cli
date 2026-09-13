@@ -181,6 +181,11 @@ pub struct PaymentKey {
 /// Load testnet credentials and build a TestContext.
 /// Returns None if no testnet credentials are available.
 pub fn setup_testnet() -> Option<TestContext> {
+    // Live tests spend testnet NEAR and take minutes: they run only when asked
+    // for by name, never as a side effect of `cargo test`.
+    if std::env::var("OUTLAYER_LIVE_TESTS").map(|v| v == "1").unwrap_or(false) == false {
+        return None;
+    }
     let network = NetworkConfig::testnet();
     let creds = config::load_credentials(&network).ok()?;
     let private_key =
@@ -230,7 +235,7 @@ macro_rules! require_testnet {
         match $crate::common::setup_testnet() {
             Some(ctx) => ctx,
             None => {
-                eprintln!("SKIP: no testnet credentials (run `outlayer login testnet`)");
+                eprintln!("SKIP: live testnet tests run only with OUTLAYER_LIVE_TESTS=1 and `outlayer login testnet` (they spend testnet NEAR and take minutes)");
                 return;
             }
         }

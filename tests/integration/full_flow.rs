@@ -85,7 +85,7 @@ async fn test_full_flow() {
         .expect("get_secrets_pubkey failed");
 
     let encrypted_key =
-        crypto::encrypt_secrets(&pubkey, &secrets_json).expect("encrypt failed");
+        crypto::encrypt_secrets(&pubkey.pubkey, &secrets_json).expect("encrypt failed");
 
     signer
         .call_contract(
@@ -136,7 +136,7 @@ async fn test_full_flow() {
         .expect("get_secrets_pubkey failed");
 
     let encrypted_s =
-        crypto::encrypt_secrets(&pubkey_s, &secret_data).expect("encrypt failed");
+        crypto::encrypt_secrets(&pubkey_s.pubkey, &secret_data).expect("encrypt failed");
 
     signer
         .call_contract(
