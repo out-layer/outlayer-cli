@@ -30,7 +30,9 @@ const ECIES_VERSION: u8 = 0x01;
 /// expects on its ECIES branch, and what `dashboard/lib/ecies.ts`
 /// produces):
 ///
-///     [ 0x01 | ephemeral_x25519_pub(32) | nonce(12) | ciphertext | tag(16) ]
+/// ```text
+/// [ 0x01 | ephemeral_x25519_pub(32) | nonce(12) | ciphertext | tag(16) ]
+/// ```
 ///
 /// Returns base64 of the above.
 pub fn encrypt_secrets(pubkey_hex: &str, plaintext: &str) -> Result<String> {

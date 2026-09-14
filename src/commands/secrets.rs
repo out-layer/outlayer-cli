@@ -115,6 +115,13 @@ fn resolve_accessor(
     project_config: Option<&ProjectConfig>,
 ) -> Result<ResolvedAccessor> {
     if let Some(hash) = wasm_hash {
+        // The contract stores a hash lowercased and echoes that spelling in
+        // the row it answers; `set` and `update` compare the echoed accessor
+        // with this one byte for byte to tell "the row" from "another row".
+        // Spelled any other way, the same hash would read as a different row
+        // — NEW for `set` (the default condition over the stored one),
+        // "no secret at this accessor" for `update`.
+        let hash = hash.trim().to_lowercase();
         return Ok(ResolvedAccessor {
             coordinator: json!({"type": "WasmHash", "hash": hash}),
             contract: json!({"WasmHash": {"hash": hash}}),
@@ -292,17 +299,6 @@ async fn stored_row(
     .context("Failed to read the stored secret")
 }
 
-async fn stored_access(
-    near: &NearClient,
-    accessor_contract: &Value,
-    profile: &str,
-    owner: &str,
-) -> Result<Option<Value>> {
-    Ok(stored_row(near, accessor_contract, profile, owner)
-        .await?
-        .and_then(|r| r.get("access").cloned()))
-}
-
 /// What `set` stores a row under when the caller gave no `--access`: the
 /// condition it already has, so a rotation never changes who may read; for a
 /// new row under a project, the signer alone — a personal secret is readable
@@ -411,18 +407,26 @@ pub async fn set(
             // keeps its own condition. Only a row at the very accessor about to
             // be written counts as existing.
             let row = stored_row(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?;
-            let existing = row.and_then(|r| {
-                let same_row = r.get("accessor").map(|a| a == &accessor.contract).unwrap_or(false);
-                if same_row {
-                    r.get("access").cloned()
-                } else {
-                    eprintln!(
-                        "Note: {profile} is stored under a different accessor ({}); this writes a NEW row.",
-                        r.get("accessor").map(|a| a.to_string()).unwrap_or_default()
-                    );
-                    None
+            let existing = match row {
+                None => None,
+                Some(r) => {
+                    // An answer that names no accessor cannot say which row it
+                    // is; storing "a new row" over it with the default would
+                    // be exactly the silent reset this read exists to prevent.
+                    let Some(found) = r.get("accessor") else {
+                        anyhow::bail!("the chain's answer names no accessor, so which row it is cannot be told — pass --access to store anyway");
+                    };
+                    if found == &accessor.contract {
+                        r.get("access").cloned()
+                    } else {
+                        eprintln!(
+                            "Note: {profile} is stored under a different accessor ({}); this writes a NEW row.",
+                            format_accessor(found)
+                        );
+                        None
+                    }
                 }
-            });
+            };
             let (access, why) = default_access(existing, &accessor.contract, &creds.account_id);
             eprintln!("Access: {} ({why}; pass --access to choose)", format_access(&access));
             access
@@ -591,6 +595,42 @@ pub async fn update(
         .collect();
     sorted_protected.sort();
 
+    let api = ApiClient::new(network);
+
+    // The merged result is stored on chain below, and `set` writes the
+    // normalised spelling — so this has to write the same one, or an update
+    // lands in a second slot instead of replacing the first.
+    //
+    // `update_user_secrets` answers with the ciphertext and nothing else, so
+    // unlike `set` there is no accessor in the reply to take it from.
+    canonicalize_repo(&api, &mut accessor, &creds.account_id, profile, None).await?;
+
+    // The merged row keeps the condition it had. An update changes values, not
+    // who may read them — re-storing under a default would silently widen a
+    // whitelisted row or narrow an app's AllowAll credential. Read before
+    // anything is signed or merged: a row that is not there, or a chain that
+    // cannot be read, stops here at no cost — not even a signature.
+    let row = stored_row(&NearClient::new(network), &accessor.contract, profile, &creds.account_id)
+        .await?
+        .context("no such secret to update — store it with `outlayer secrets set` first")?;
+    // `get_secrets` answers a branch-specific read with the WILDCARD row when
+    // no branch row exists. An update merges into the row it was asked about;
+    // it does not mint a branch row carrying another row's condition.
+    let Some(found) = row.get("accessor") else {
+        anyhow::bail!("the chain's answer names no accessor, so which row it is cannot be told — nothing changed");
+    };
+    if found != &accessor.contract {
+        anyhow::bail!(
+            "no secret at this accessor (profile: {profile}); {} holds one — \
+             `update` merges into an existing row, `set` creates one",
+            format_accessor(found)
+        );
+    }
+    let access = row
+        .get("access")
+        .cloned()
+        .context("the stored row carries no access condition")?;
+
     // NEP-413 message
     let message = update_message(&creds.account_id, profile, &sorted_keys, &sorted_protected);
 
@@ -605,7 +645,6 @@ pub async fn update(
             .wallet_key
             .as_ref()
             .context("wallet_key missing from credentials")?;
-        let api = ApiClient::new(network);
         let resp = api.sign_message(wk, &message, recipient, None).await?;
         (resp.signature_base64, resp.public_key, resp.nonce)
     } else {
@@ -631,25 +670,6 @@ pub async fn update(
         .iter()
         .map(|s| json!({"name": s.name, "generation_type": s.generation_type}))
         .collect();
-
-    let api = ApiClient::new(network);
-
-    // The merged result is stored on chain below, and `set` writes the
-    // normalised spelling — so this has to write the same one, or an update
-    // lands in a second slot instead of replacing the first.
-    //
-    // `update_user_secrets` answers with the ciphertext and nothing else, so
-    // unlike `set` there is no accessor in the reply to take it from.
-    canonicalize_repo(&api, &mut accessor, &creds.account_id, profile, None).await?;
-
-    // The merged row keeps the condition it had. An update changes values, not
-    // who may read them — re-storing under a default would silently widen a
-    // whitelisted row or narrow an app's AllowAll credential. Read before the
-    // TEE merges anything: a row that is not there, or a chain that cannot be
-    // read, stops here at no cost.
-    let access = stored_access(&NearClient::new(network), &accessor.contract, profile, &creds.account_id)
-        .await?
-        .context("no such secret to update — store it with `outlayer secrets set` first")?;
 
     eprintln!("Updating secrets...");
     let response = api
@@ -738,13 +758,15 @@ pub async fn access(
     // The read may have been answered by the wildcard row. `update_access` keys
     // on the exact accessor, so pricing one row and editing another ends in
     // `Secrets not found` after the user has already paid for a view.
-    if let Some(found) = row.get("accessor") {
-        if found != &accessor.contract {
-            anyhow::bail!(
-                "no secret at this accessor (profile: {profile}); {found} holds one, \
-                 and update_access edits the exact accessor it is given"
-            );
-        }
+    let Some(found) = row.get("accessor") else {
+        anyhow::bail!("the chain's answer names no accessor, so which row it is cannot be told — nothing changed");
+    };
+    if found != &accessor.contract {
+        anyhow::bail!(
+            "no secret at this accessor (profile: {profile}); {} holds one, \
+             and update_access edits the exact accessor it is given",
+            format_accessor(found)
+        );
     }
 
     // A condition is stored bytes, and the contract re-prices the row on every
@@ -1847,6 +1869,17 @@ mod repo_normalization_tests {
             update_message("alice.near", "default", &[], &[]),
             "Update Outlayer secrets for alice.near:default",
         );
+    }
+
+    /// A WasmHash accessor is spelled the way the contract stores and echoes
+    /// it: lowercase. `set` and `update` compare the echoed accessor with
+    /// this one byte for byte, so any other spelling would read as another
+    /// row — NEW for `set`, with the default condition over the stored one.
+    #[test]
+    fn a_wasm_hash_is_lowercased_the_way_the_contract_stores_it() {
+        let a = resolve_accessor(None, None, None, Some("  BEEF ".to_string()), None).unwrap();
+        assert_eq!(a.contract, json!({"WasmHash": {"hash": "beef"}}));
+        assert_eq!(a.coordinator, json!({"type": "WasmHash", "hash": "beef"}));
     }
 
     /// An answer without a normalised repo leaves the accessor alone — the
