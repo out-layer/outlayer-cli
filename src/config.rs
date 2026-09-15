@@ -96,11 +96,33 @@ pub struct NetworkConfig {
     pub mpc_contract_id: String,
 }
 
+/// The RPC endpoint for the network being addressed.
+///
+/// `OUTLAYER_RPC_URL` wins when it holds something. A live test run has to
+/// reach the chain through a KEYED endpoint — the free host is rate-limited,
+/// and its timeouts read exactly like product failures — and a key is never a
+/// default, so the environment is the only place one can come from. It applies
+/// to whichever network the command resolved, because a command addresses one.
+fn rpc_url_for(default: &str) -> String {
+    chosen_rpc_url(std::env::var("OUTLAYER_RPC_URL").ok(), default)
+}
+
+/// [`rpc_url_for`] with the variable already read, so the rule can be tested
+/// without setting a variable the whole process shares.
+pub(crate) fn chosen_rpc_url(from_env: Option<String>, default: &str) -> String {
+    match from_env {
+        Some(url) if !url.trim().is_empty() => url.trim().to_string(),
+        // An empty or blank value is an UNSET one: `OUTLAYER_RPC_URL=` in a
+        // script that meant to clear it must not send every call to "".
+        _ => default.to_string(),
+    }
+}
+
 impl NetworkConfig {
     pub fn mainnet() -> Self {
         Self {
             network_id: "mainnet".to_string(),
-            rpc_url: "https://rpc.mainnet.near.org".to_string(),
+            rpc_url: rpc_url_for("https://rpc.mainnet.near.org"),
             contract_id: "outlayer.near".to_string(),
             wallet_url: "https://app.mynearwallet.com".to_string(),
             api_base_url: "https://api.outlayer.fastnear.com".to_string(),
@@ -115,7 +137,7 @@ impl NetworkConfig {
     pub fn testnet() -> Self {
         Self {
             network_id: "testnet".to_string(),
-            rpc_url: "https://test.rpc.fastnear.com".to_string(),
+            rpc_url: rpc_url_for("https://test.rpc.fastnear.com"),
             contract_id: "outlayer.testnet".to_string(),
             wallet_url: "https://testnet.mynearwallet.com".to_string(),
             api_base_url: "https://testnet-api.outlayer.fastnear.com".to_string(),

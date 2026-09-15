@@ -312,11 +312,47 @@ fn default_access(existing: Option<Value>, accessor_contract: &Value, owner: &st
     }
 }
 
+/// Which condition a `set` without `--access` writes, given what the chain
+/// answered when asked for this profile.
+///
+/// The two refusals are the point. A row the chain answered for under ANOTHER
+/// accessor is a wildcard row this write would SHADOW, or two normalisers
+/// disagreeing about one repo; taking the new-row default there opens the value
+/// to everyone and hides the row that was closed, on a command whose subject
+/// was the value and not its readers. An answer that names no accessor at all
+/// is the same problem without a name for it. Either way the caller is told
+/// what to pass rather than having the readers decided for them.
+fn condition_for_set(
+    row: Option<&Value>,
+    accessor: &Value,
+    profile: &str,
+    signer: &str,
+) -> Result<(Value, AccessOrigin)> {
+    let existing = match row {
+        None => None,
+        Some(r) => {
+            let Some(found) = r.get("accessor") else {
+                anyhow::bail!("the chain's answer names no accessor, so which row it is cannot be told — pass --access to store anyway");
+            };
+            if found != accessor {
+                anyhow::bail!(
+                    "{profile} is stored under a different accessor ({}), so this would write a NEW row \
+                     that shadows it. Pass --access to say who may read the new row — \
+                     `--access whitelist:{signer}` keeps it to you — or store under that accessor instead.",
+                    format_accessor(found)
+                );
+            }
+            r.get("access").cloned()
+        }
+    };
+    Ok(default_access(existing, accessor, signer))
+}
+
 /// Where a condition written without `--access` came from. A value rather than
 /// the sentence, because one caller ACTS on it — a rotation that forwards a
 /// stored condition explains a refusal about that condition — and a rule that
 /// reads its own wording breaks the moment the wording is edited.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum AccessOrigin {
     Kept,
     NewProjectRow,
@@ -433,35 +469,8 @@ pub async fn set(
             // keeps its own condition. Only a row at the very accessor about to
             // be written counts as existing.
             let row = stored_row(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?;
-            let existing = match row {
-                None => None,
-                Some(r) => {
-                    // An answer that names no accessor cannot say which row it
-                    // is; storing "a new row" over it with the default would
-                    // be exactly the silent reset this read exists to prevent.
-                    let Some(found) = r.get("accessor") else {
-                        anyhow::bail!("the chain's answer names no accessor, so which row it is cannot be told — pass --access to store anyway");
-                    };
-                    if found == &accessor.contract {
-                        r.get("access").cloned()
-                    } else {
-                        // The chain answered for a row under another accessor —
-                        // a wildcard row a branch-specific write would SHADOW,
-                        // or two normalisers disagreeing about one repo. Writing
-                        // here with the new-row default would open the value to
-                        // everyone and hide the row that was closed, on a command
-                        // whose subject was the value, not its readers.
-                        anyhow::bail!(
-                            "{profile} is stored under a different accessor ({}), so this would write a NEW row \
-                             that shadows it. Pass --access to say who may read the new row — \
-                             `--access whitelist:{}` keeps it to you — or store under that accessor instead.",
-                            format_accessor(found),
-                            creds.account_id
-                        );
-                    }
-                }
-            };
-            let (access, origin) = default_access(existing, &accessor.contract, &creds.account_id);
+            let (access, origin) =
+                condition_for_set(row.as_ref(), &accessor.contract, profile, &creds.account_id)?;
             kept_condition = origin == AccessOrigin::Kept;
             eprintln!("Access: {} ({}; pass --access to choose)", format_access(&access), origin.why());
             access
@@ -2036,6 +2045,90 @@ mod access_parsing_tests {
             json!({ "Whitelist": { "accounts": ["me.near"] } })
         );
         assert_eq!(default_access(None, &repo, "me.near").0, json!("AllowAll"));
+    }
+
+    fn project_accessor() -> Value {
+        json!({ "Project": { "project_id": "me.near/app" } })
+    }
+
+    fn row_under(accessor: Value, access: Value) -> Value {
+        json!({ "accessor": accessor, "access": access, "encrypted_secrets": "x" })
+    }
+
+    /// A rotation forwards the condition the row already holds, and says so.
+    #[test]
+    fn a_row_at_this_very_accessor_keeps_its_condition() {
+        let kept = json!({ "Whitelist": { "accounts": ["me.near", "agent.near"] } });
+        let (access, origin) = condition_for_set(
+            Some(&row_under(project_accessor(), kept.clone())),
+            &project_accessor(),
+            "mercury",
+            "me.near",
+        )
+        .expect("the row is this row");
+        assert_eq!(access, kept, "a rotation must not edit who may read");
+        assert_eq!(origin, AccessOrigin::Kept);
+    }
+
+    /// The whole point of reading the chain first: the answer may be the
+    /// WILDCARD row, which is a different row with a condition of its own.
+    /// Writing here with the new-row default would open the value to everyone
+    /// and hide the row that was closed.
+    #[test]
+    fn a_row_under_another_accessor_refuses_instead_of_shadowing_it() {
+        let closed = json!({ "Whitelist": { "accounts": ["me.near"] } });
+        let wildcard = json!({ "Repo": { "repo": "github.com/me/app", "branch": null } });
+        let branch = json!({ "Repo": { "repo": "github.com/me/app", "branch": "next" } });
+        let err = condition_for_set(
+            Some(&row_under(wildcard, closed)),
+            &branch,
+            "mercury",
+            "me.near",
+        )
+        .expect_err("a different accessor is a different row");
+        let message = format!("{err:#}");
+        assert!(message.contains("different accessor"), "{message}");
+        assert!(message.contains("shadows it"), "{message}");
+        assert!(message.contains("--access whitelist:me.near"), "the refusal must say what to pass: {message}");
+    }
+
+    #[test]
+    fn an_answer_that_names_no_accessor_refuses_too() {
+        let err = condition_for_set(
+            Some(&json!({ "access": "AllowAll" })),
+            &project_accessor(),
+            "mercury",
+            "me.near",
+        )
+        .expect_err("an answer that cannot say which row it is decides nothing");
+        assert!(format!("{err:#}").contains("names no accessor"));
+    }
+
+    /// The control: no row at all is a NEW row, and a new project row is the
+    /// signer's alone. Without this the two refusals above would only say
+    /// "this function returns errors".
+    #[test]
+    fn no_row_at_all_is_a_new_row() {
+        let (access, origin) =
+            condition_for_set(None, &project_accessor(), "mercury", "me.near").expect("a new row");
+        assert_eq!(access, whitelist_of(&["me.near"]));
+        assert_eq!(origin, AccessOrigin::NewProjectRow);
+    }
+
+    /// A live run has to reach the chain through a KEYED endpoint; a key is
+    /// never a default, so the environment is the only place one comes from.
+    #[test]
+    fn the_environment_can_name_the_rpc_and_a_blank_value_does_not() {
+        use crate::config::chosen_rpc_url;
+        let default = "https://test.rpc.fastnear.com";
+        assert_eq!(chosen_rpc_url(None, default), default);
+        assert_eq!(chosen_rpc_url(Some(String::new()), default), default, "an empty value is an unset one");
+        assert_eq!(chosen_rpc_url(Some("   ".to_string()), default), default, "and so is a blank one");
+        assert_eq!(
+            chosen_rpc_url(Some("  https://rpc.example/key  ".to_string()), default),
+            "https://rpc.example/key",
+            "a named endpoint wins over the default, trimmed"
+        );
     }
 
     /// What `list` prints is what `--access` takes: the spelling round-trips
