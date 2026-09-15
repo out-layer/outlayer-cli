@@ -304,11 +304,33 @@ async fn stored_row(
 /// new row under a project, the signer alone — a personal secret is readable
 /// by whoever names it only if its owner says so; for a new repository- or
 /// hash-bound row, everyone, as those rows are an app's own.
-fn default_access(existing: Option<Value>, accessor_contract: &Value, owner: &str) -> (Value, &'static str) {
+fn default_access(existing: Option<Value>, accessor_contract: &Value, owner: &str) -> (Value, AccessOrigin) {
     match existing {
-        Some(access) => (access, "kept the stored condition"),
-        None if accessor_contract.get("Project").is_some() => (whitelist_of(&[owner]), "new project row: only you"),
-        None => (json!("AllowAll"), "new row: everyone"),
+        Some(access) => (access, AccessOrigin::Kept),
+        None if accessor_contract.get("Project").is_some() => (whitelist_of(&[owner]), AccessOrigin::NewProjectRow),
+        None => (json!("AllowAll"), AccessOrigin::NewRow),
+    }
+}
+
+/// Where a condition written without `--access` came from. A value rather than
+/// the sentence, because one caller ACTS on it — a rotation that forwards a
+/// stored condition explains a refusal about that condition — and a rule that
+/// reads its own wording breaks the moment the wording is edited.
+#[derive(PartialEq)]
+enum AccessOrigin {
+    Kept,
+    NewProjectRow,
+    NewRow,
+}
+
+impl AccessOrigin {
+    /// How the choice is worded for the person running the command.
+    fn why(&self) -> &'static str {
+        match self {
+            AccessOrigin::Kept => "kept the stored condition",
+            AccessOrigin::NewProjectRow => "new project row: only you",
+            AccessOrigin::NewRow => "new row: everyone",
+        }
     }
 }
 
@@ -396,6 +418,10 @@ pub async fn set(
     // caller nothing and no generated key is made to be thrown away. The
     // accessor takes its canonical spelling first, so the row read here is the
     // row written below.
+    // A rotation forwards the condition the row already holds. If the contract
+    // refuses THAT, the refusal is about a rule this command never mentioned,
+    // so it is worth saying where the rule lives and what fixes it.
+    let mut kept_condition = false;
     let access = match explicit_access {
         Some(access) => access,
         None => {
@@ -419,16 +445,25 @@ pub async fn set(
                     if found == &accessor.contract {
                         r.get("access").cloned()
                     } else {
-                        eprintln!(
-                            "Note: {profile} is stored under a different accessor ({}); this writes a NEW row.",
-                            format_accessor(found)
+                        // The chain answered for a row under another accessor —
+                        // a wildcard row a branch-specific write would SHADOW,
+                        // or two normalisers disagreeing about one repo. Writing
+                        // here with the new-row default would open the value to
+                        // everyone and hide the row that was closed, on a command
+                        // whose subject was the value, not its readers.
+                        anyhow::bail!(
+                            "{profile} is stored under a different accessor ({}), so this would write a NEW row \
+                             that shadows it. Pass --access to say who may read the new row — \
+                             `--access whitelist:{}` keeps it to you — or store under that accessor instead.",
+                            format_accessor(found),
+                            creds.account_id
                         );
-                        None
                     }
                 }
             };
-            let (access, why) = default_access(existing, &accessor.contract, &creds.account_id);
-            eprintln!("Access: {} ({why}; pass --access to choose)", format_access(&access));
+            let (access, origin) = default_access(existing, &accessor.contract, &creds.account_id);
+            kept_condition = origin == AccessOrigin::Kept;
+            eprintln!("Access: {} ({}; pass --access to choose)", format_access(&access), origin.why());
             access
         }
     };
@@ -532,6 +567,17 @@ pub async fn set(
             deposit,
         )
         .await
+        .map_err(|e| {
+            if kept_condition && format!("{e:#}").to_lowercase().contains("condition") {
+                e.context(
+                    "this rotation kept the condition the row already holds, and the contract \
+                     refuses it. Narrow the readers first — `outlayer secrets access …` or the \
+                     dashboard's Access screen — then store the new value",
+                )
+            } else {
+                e
+            }
+        })
         .context("Failed to store secrets")?;
 
     // Summary
@@ -687,6 +733,19 @@ pub async fn update(
             "recipient": recipient,
         }))
         .await
+        .map_err(|e| {
+            // `update` re-presents the row's own condition, so a refusal about
+            // it is about a rule this command never mentioned.
+            if format!("{e:#}").to_lowercase().contains("condition") {
+                e.context(
+                    "this update kept the condition the row already holds, and the contract \
+                     refuses it. Narrow the readers first — `outlayer secrets access …` or the \
+                     dashboard's Access screen — then update the value",
+                )
+            } else {
+                e
+            }
+        })
         .context("Failed to update secrets")?;
 
     // Store merged result on contract
