@@ -1,6 +1,6 @@
 [package]
 name = "outlayer-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 # near-primitives 0.29 / cargo_metadata 0.21 pulled in by the
 # near-jsonrpc-client 0.16 bump require rustc 1.86+. Cargo refuses
