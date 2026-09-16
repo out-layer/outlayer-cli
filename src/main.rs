@@ -259,7 +259,8 @@ enum SecretsCommands {
         #[arg(long)]
         branch: Option<String>,
 
-        /// WASM hash accessor
+        /// WASM hash accessor: the row a raw WASM URL run reads under. To
+        /// lock a project or repository row to one build, use --build.
         #[arg(long)]
         wasm_hash: Option<String>,
 
@@ -280,6 +281,19 @@ enum SecretsCommands {
         /// default-master path is used.
         #[arg(long)]
         vault_id: Option<String>,
+
+        /// Lock the row to one build: the SHA-256 of the WebAssembly bytes
+        /// ("Executed binary" in an execution's details). ANDed with --access
+        /// or the default condition; a rebuild cannot read the row until
+        /// `secrets access --build <new hash>` moves it. The value stays.
+        #[arg(long)]
+        build: Option<String>,
+
+        /// Remove the row's build lock. Required to replace a locked row's
+        /// condition with --access when no --build is given, and on its own it
+        /// strips the lock the row carries.
+        #[arg(long)]
+        drop_build: bool,
     },
     /// Leave a secret for an agent to use with one connector
     SetForAgent {
@@ -385,9 +399,20 @@ enum SecretsCommands {
         wasm_hash: Option<String>,
 
         /// The new condition: allow-all, or whitelist:acc1,acc2 with optional
-        /// acc@deadline entries (UTC, YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DD)
+        /// acc@deadline entries (UTC, YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DD).
+        /// Omit it with --build to move the lock and keep the readers.
         #[arg(long)]
-        access: String,
+        access: Option<String>,
+
+        /// Also lock the row to one build (SHA-256 of the WebAssembly bytes),
+        /// ANDed with --access. How a locked row moves to its next release.
+        #[arg(long)]
+        build: Option<String>,
+
+        /// Remove the row's build lock. Required to replace a locked row's
+        /// condition with --access when no --build is given.
+        #[arg(long)]
+        drop_build: bool,
     },
     /// Delete secrets for a profile
     Delete {
@@ -775,6 +800,8 @@ async fn main() -> anyhow::Result<()> {
                     generate,
                     access,
                     vault_id,
+                    build,
+                    drop_build,
                 } => {
                     commands::secrets::set(
                         &network,
@@ -788,6 +815,8 @@ async fn main() -> anyhow::Result<()> {
                         generate,
                         access.as_deref(),
                         vault_id,
+                        build.as_deref(),
+                        drop_build,
                     )
                     .await?
                 }
@@ -853,6 +882,8 @@ async fn main() -> anyhow::Result<()> {
                     branch,
                     wasm_hash,
                     access,
+                    build,
+                    drop_build,
                 } => {
                     commands::secrets::access(
                         &network,
@@ -862,7 +893,9 @@ async fn main() -> anyhow::Result<()> {
                         repo,
                         branch,
                         wasm_hash,
-                        &access,
+                        access.as_deref(),
+                        build.as_deref(),
+                        drop_build,
                     )
                     .await?
                 }

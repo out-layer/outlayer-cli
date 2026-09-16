@@ -124,7 +124,12 @@ outlayer projects bob.near
 outlayer secrets set '{"API_KEY":"sk-...","DB_URL":"postgres://..."}'
 outlayer secrets set '{"API_KEY":"sk-..."}' --project alice.near/my-agent
 outlayer secrets set '{"API_KEY":"sk-..."}' --repo github.com/user/repo --branch main
-outlayer secrets set '{"API_KEY":"sk-..."}' --wasm-hash abc123...
+outlayer secrets set '{"API_KEY":"sk-..."}' --wasm-hash abc123...   # the row a raw WASM URL run reads under
+
+# Lock a project's row to one build: only a run of these exact bytes reads it, a rebuild is refused.
+# The hash is "Executed binary" in an execution's details. Move it to the next release with `access`.
+outlayer secrets set '{"SIGNING_KEY":"..."}' --project alice.near/oracle --build <sha256>
+outlayer secrets access --project alice.near/oracle --access whitelist:alice.near --build <new sha256>
 
 # Generate protected secrets in TEE (values never visible)
 outlayer secrets set --generate PROTECTED_MASTER_KEY:hex32

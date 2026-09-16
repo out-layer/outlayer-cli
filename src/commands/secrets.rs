@@ -156,6 +156,86 @@ fn resolve_accessor(
 
 // ── Access Control Parsing ───────────────────────────────────────────
 
+/// The condition with every `WasmHash` leaf removed and the nodes that held
+/// them simplified away: a `Logic` left with one branch becomes that branch,
+/// one left with none disappears, and a `Not` over a vanished subtree goes with
+/// it. `None` when nothing but build leaves remained.
+///
+/// Exists so that re-locking REPLACES the lock. Without it, `set --build`
+/// against a row that is already locked takes the stored condition as "kept"
+/// and wraps it again, so every release nests one `And` deeper and pays for
+/// the extra bytes — `And[And[And[whitelist, build], build], build]`.
+fn without_build_leaves(condition: &Value) -> Option<Value> {
+    if condition.get("WasmHash").is_some() {
+        return None;
+    }
+    if let Some(logic) = condition.get("Logic") {
+        let kept: Vec<Value> = logic
+            .get("conditions")
+            .and_then(Value::as_array)
+            .map(|cs| cs.iter().filter_map(without_build_leaves).collect())
+            .unwrap_or_default();
+        return match kept.len() {
+            0 => None,
+            1 => kept.into_iter().next(),
+            _ => Some(json!({
+                "Logic": {
+                    "operator": logic.get("operator").cloned().unwrap_or_else(|| json!("And")),
+                    "conditions": kept,
+                }
+            })),
+        };
+    }
+    if let Some(not) = condition.get("Not") {
+        let inner = without_build_leaves(not.get("condition")?)?;
+        return Some(json!({ "Not": { "condition": inner } }));
+    }
+    Some(condition.clone())
+}
+
+/// The condition, locked to one build: `And[condition, WasmHash(hash)]`, or
+/// the `WasmHash` leaf alone when what remained admitted everyone — an AND
+/// with AllowAll says nothing AllowAll did not. Any lock the condition already
+/// carried is replaced, not nested. The hash is the SHA-256 of the WebAssembly
+/// bytes as 64 hex characters, the form the worker reports and the contract
+/// stores (lowercased here, as the contract requires); anything else is
+/// refused rather than stored as a leaf that admits nobody.
+fn lock_to_build(condition: Value, build: Option<&str>) -> Result<Value> {
+    let Some(build) = build else { return Ok(condition) };
+    let hash = build.trim().to_ascii_lowercase();
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "--build must be the SHA-256 of the build as 64 hex characters \
+             (\"Executed binary\" in an execution's details on the dashboard)"
+        );
+    }
+    let leaf = json!({ "WasmHash": { "hash": hash } });
+    match without_build_leaves(&condition) {
+        None => Ok(leaf),
+        Some(base) if base == json!("AllowAll") => Ok(leaf),
+        Some(base) => Ok(json!({ "Logic": { "operator": "And", "conditions": [base, leaf] } })),
+    }
+}
+
+/// Every `WasmHash` leaf in a stored condition, as the chain returned it.
+fn build_locks_of(access: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(node: &Value, out: &mut Vec<String>) {
+        if let Some(hash) = node.get("WasmHash").and_then(|w| w.get("hash")).and_then(Value::as_str) {
+            out.push(hash.to_string());
+            return;
+        }
+        if let Some(cs) = node.get("Logic").and_then(|l| l.get("conditions")).and_then(Value::as_array) {
+            cs.iter().for_each(|c| walk(c, out));
+        }
+        if let Some(inner) = node.get("Not").and_then(|n| n.get("condition")) {
+            walk(inner, out);
+        }
+    }
+    walk(access, &mut out);
+    out
+}
+
 fn parse_access(access_str: &str) -> Result<Value> {
     match access_str {
         "allow-all" | "AllowAll" => Ok(json!("AllowAll")),
@@ -430,6 +510,8 @@ pub async fn set(
     generate: Vec<String>,
     access_str: Option<&str>,
     vault_id: Option<String>,
+    build: Option<&str>,
+    drop_build: bool,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
 
@@ -459,7 +541,36 @@ pub async fn set(
     // so it is worth saying where the rule lives and what fixes it.
     let mut kept_condition = false;
     let access = match explicit_access {
-        Some(access) => access,
+        // An explicit condition REPLACES the stored one — including any build
+        // lock it carried. That is what `--access` means, but losing a lock is
+        // not what someone changing readers expects, and nothing in the result
+        // would say it happened. So the row is read first and the swap refused
+        // unless the caller says which build the new condition is for, or says
+        // out loud that the lock is to go.
+        Some(access) => {
+            canonicalize_repo(&api, &mut accessor, &creds.account_id, profile, vault_id.as_deref()).await?;
+            let row = stored_row(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?;
+            // Only a row at the very accessor about to be written counts. A
+            // branch-specific read is answered by the WILDCARD row when no
+            // branch row exists, and a lock on that row says nothing about the
+            // one this command creates — refusing on it would block a write
+            // that could not have unlocked anything, naming another row.
+            let locked_to = row
+                .as_ref()
+                .filter(|r| r.get("accessor") == Some(&accessor.contract))
+                .and_then(|r| r.get("access"))
+                .map(build_locks_of)
+                .unwrap_or_default();
+            if !locked_to.is_empty() && build.is_none() && !drop_build {
+                anyhow::bail!(
+                    "{profile} is locked to build {} and --access would replace that condition, \
+                     unlocking the row. Pass --build <sha256> to keep it locked (to that build or \
+                     another), or --drop-build to remove the lock deliberately.",
+                    locked_to[0]
+                );
+            }
+            access
+        }
         None => {
             canonicalize_repo(&api, &mut accessor, &creds.account_id, profile, vault_id.as_deref()).await?;
             // `get_secrets` answers a branch-specific read with the WILDCARD row
@@ -476,6 +587,23 @@ pub async fn set(
             access
         }
     };
+    // `--build` narrows whatever was decided above, a kept condition included:
+    // the row's readers do change, so it is no longer "kept".
+    let access = if drop_build {
+        // Asked for out loud, so it happens rather than merely being excused.
+        let stripped = without_build_leaves(&access).unwrap_or_else(|| json!("AllowAll"));
+        if stripped != access {
+            kept_condition = false;
+            eprintln!("Build lock removed: {}", format_access(&stripped));
+        }
+        stripped
+    } else {
+        lock_to_build(access, build)?
+    };
+    if build.is_some() {
+        kept_condition = false;
+        eprintln!("Locked to build: {}", format_access(&access));
+    }
 
     let encrypted_data = if generate_specs.is_empty() {
         // Simple flow: encrypt manually, no TEE generation
@@ -811,10 +939,17 @@ pub async fn access(
     repo: Option<String>,
     branch: Option<String>,
     wasm_hash: Option<String>,
-    access_str: &str,
+    access_str: Option<&str>,
+    build: Option<&str>,
+    drop_build: bool,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    let new_access = parse_access(access_str)?;
+    if access_str.is_none() && build.is_none() && !drop_build {
+        anyhow::bail!("nothing to change: pass --access to set who may read, --build to move the lock, --drop-build to remove it, or a combination");
+    }
+    if build.is_some() && drop_build {
+        anyhow::bail!("--build and --drop-build ask for opposite things; pass one");
+    }
 
     let mut accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
     canonicalize_repo(&ApiClient::new(network), &mut accessor, &creds.account_id, profile, None).await?;
@@ -836,6 +971,39 @@ pub async fn access(
             format_accessor(found)
         );
     }
+
+    // `--build` alone moves the lock and keeps the readers: the stored condition
+    // is taken, its build leaves are lifted off by `lock_to_build`, and the new
+    // one goes on. Without this an owner re-pointing a lock has to restate the
+    // whole condition, and a slip to `allow-all` widens the row while reading
+    // like a narrowing edit.
+    let stored_locks = row.get("access").map(build_locks_of).unwrap_or_default();
+    let base = match access_str {
+        // Replacing the condition drops any lock it carried, and this is the
+        // command the docs send an owner to when MOVING a lock — so the slip is
+        // most likely here, not in `set`. Same guard, same two ways past it.
+        Some(text) => {
+            if !stored_locks.is_empty() && build.is_none() && !drop_build {
+                anyhow::bail!(
+                    "{profile} is locked to build {} and --access would replace that condition, \
+                     unlocking the row. Pass --build <sha256> to keep it locked (to that build or \
+                     another), or --drop-build to remove the lock deliberately.",
+                    stored_locks[0]
+                );
+            }
+            parse_access(text)?
+        }
+        None => row
+            .get("access")
+            .cloned()
+            .context("the stored row carries no access condition to keep")?,
+    };
+    let new_access = if drop_build && build.is_none() {
+        without_build_leaves(&base).unwrap_or_else(|| json!("AllowAll"))
+    } else {
+        lock_to_build(base, build)?
+    };
+    eprintln!("Access: {}", format_access(&new_access));
 
     // A condition is stored bytes, and the contract re-prices the row on every
     // edit. Attaching the whole estimate is always enough: the deposit already
@@ -1460,6 +1628,9 @@ fn format_access(access: &Value) -> String {
     }
     if let Some(pattern) = obj.get("AccountPattern").and_then(|p| p.get("pattern")).and_then(Value::as_str) {
         return format!("pattern:{pattern}");
+    }
+    if let Some(hash) = obj.get("WasmHash").and_then(|w| w.get("hash")).and_then(Value::as_str) {
+        return format!("build:{hash}");
     }
     for chain_answered in ["NearBalance", "FtBalance", "NftOwned", "DaoMember"] {
         if let Some(inner) = obj.get(chain_answered) {
@@ -2154,5 +2325,155 @@ mod access_parsing_tests {
             { "Not": { "condition": { "ValidUntil": { "until_ns": "0" } } } }
         ]}});
         assert_eq!(format_access(&hand_written), "(pattern:.*\\.near and not until 1970-01-01T00:00:00Z)");
+    }
+}
+
+/// `--build` locks a row to one build, and re-locking REPLACES the lock.
+///
+/// The nesting this guards against is not cosmetic. `set` without `--access`
+/// keeps the stored condition, so a second `set --build` takes a condition
+/// that already carries a leaf and wraps it again — one `And` deeper and a few
+/// dozen more paid-for bytes on every release, forever.
+#[cfg(test)]
+mod the_build_lock_replaces_rather_than_nests {
+    use super::*;
+
+    const H1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const H2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn leaf(hash: &str) -> Value {
+        json!({ "WasmHash": { "hash": hash } })
+    }
+    fn wl() -> Value {
+        json!({ "Whitelist": { "accounts": ["me.near"] } })
+    }
+    /// Every `WasmHash` leaf anywhere in the tree.
+    fn leaves(condition: &Value) -> Vec<String> {
+        let mut out = Vec::new();
+        fn walk(node: &Value, out: &mut Vec<String>) {
+            if let Some(h) = node.get("WasmHash").and_then(|w| w.get("hash")).and_then(Value::as_str) {
+                out.push(h.to_string());
+                return;
+            }
+            if let Some(cs) = node.get("Logic").and_then(|l| l.get("conditions")).and_then(Value::as_array) {
+                cs.iter().for_each(|c| walk(c, out));
+            }
+            if let Some(inner) = node.get("Not").and_then(|n| n.get("condition")) {
+                walk(inner, out);
+            }
+        }
+        walk(condition, &mut out);
+        out
+    }
+
+    #[test]
+    fn no_build_leaves_the_condition_alone() {
+        assert_eq!(lock_to_build(wl(), None).unwrap(), wl());
+    }
+
+    #[test]
+    fn a_first_lock_ands_the_leaf_on() {
+        let locked = lock_to_build(wl(), Some(H1)).unwrap();
+        assert_eq!(locked, json!({ "Logic": { "operator": "And", "conditions": [wl(), leaf(H1)] } }));
+    }
+
+    /// An AND with AllowAll says nothing AllowAll did not.
+    #[test]
+    fn allow_all_narrows_to_the_leaf_alone() {
+        assert_eq!(lock_to_build(json!("AllowAll"), Some(H1)).unwrap(), leaf(H1));
+    }
+
+    #[test]
+    fn locking_twice_leaves_one_leaf() {
+        let once = lock_to_build(wl(), Some(H1)).unwrap();
+        let twice = lock_to_build(once.clone(), Some(H1)).unwrap();
+        assert_eq!(twice, once, "a repeat must be a no-op, not another wrapper");
+        assert_eq!(leaves(&twice).len(), 1);
+    }
+
+    #[test]
+    fn a_new_build_replaces_the_old_one() {
+        let locked = lock_to_build(lock_to_build(wl(), Some(H1)).unwrap(), Some(H2)).unwrap();
+        assert_eq!(leaves(&locked), vec![H2.to_string()], "the old lock is gone, not kept beside");
+        assert_eq!(locked, json!({ "Logic": { "operator": "And", "conditions": [wl(), leaf(H2)] } }));
+    }
+
+    /// A row whose whole condition was the lock: nothing remains to AND onto.
+    #[test]
+    fn a_bare_lock_becomes_the_new_bare_lock() {
+        assert_eq!(lock_to_build(leaf(H1), Some(H2)).unwrap(), leaf(H2));
+    }
+
+    /// Stripping must not leave an empty `Logic` node behind — the contract
+    /// would store it and the keystore would evaluate an `And` of nothing as
+    /// admitting everyone.
+    #[test]
+    fn emptied_nodes_disappear_rather_than_stay_empty() {
+        let nested = json!({ "Logic": { "operator": "Or", "conditions": [
+            leaf(H1),
+            { "Logic": { "operator": "And", "conditions": [leaf(H1), leaf(H2)] } }
+        ] } });
+        assert_eq!(lock_to_build(nested, Some(H2)).unwrap(), leaf(H2));
+
+        let under_not = json!({ "Not": { "condition": leaf(H1) } });
+        assert_eq!(lock_to_build(under_not, Some(H2)).unwrap(), leaf(H2));
+    }
+
+    /// A branch that is not about builds survives the strip.
+    #[test]
+    fn only_build_leaves_are_removed() {
+        let mixed = json!({ "Logic": { "operator": "Or", "conditions": [wl(), leaf(H1)] } });
+        let locked = lock_to_build(mixed, Some(H2)).unwrap();
+        assert_eq!(locked, json!({ "Logic": { "operator": "And", "conditions": [wl(), leaf(H2)] } }));
+    }
+
+    /// Refused before anything is signed, and lowercased on the way in.
+    #[test]
+    fn only_a_sha256_is_accepted() {
+        assert_eq!(lock_to_build(wl(), Some(&H1.to_uppercase())).unwrap(), lock_to_build(wl(), Some(H1)).unwrap());
+        assert_eq!(lock_to_build(wl(), Some(&format!("  {H1}  "))).unwrap(), lock_to_build(wl(), Some(H1)).unwrap());
+        for bad in [&H1[..63], "", "zz", &format!("{}g", &H1[..63])] {
+            assert!(lock_to_build(wl(), Some(bad)).is_err(), "{bad} must be refused");
+        }
+    }
+
+    /// `list` and every confirmation line read the leaf back.
+    #[test]
+    fn a_locked_condition_reads_back_as_a_build() {
+        assert_eq!(format_access(&leaf(H1)), format!("build:{H1}"));
+        assert_eq!(
+            format_access(&lock_to_build(wl(), Some(H1)).unwrap()),
+            format!("(whitelist:me.near and build:{H1})")
+        );
+    }
+}
+
+/// A stored lock is found before `--access` can replace it.
+#[cfg(test)]
+mod a_stored_lock_is_seen_before_it_is_replaced {
+    use super::*;
+
+    const H: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+    #[test]
+    fn a_lock_is_found_wherever_it_sits() {
+        let wl = json!({ "Whitelist": { "accounts": ["me.near"] } });
+        assert_eq!(build_locks_of(&json!({ "WasmHash": { "hash": H } })), vec![H.to_string()]);
+        assert_eq!(
+            build_locks_of(&json!({ "Logic": { "operator": "And", "conditions": [wl, { "WasmHash": { "hash": H } }] } })),
+            vec![H.to_string()]
+        );
+        assert_eq!(
+            build_locks_of(&json!({ "Not": { "condition": { "WasmHash": { "hash": H } } } })),
+            vec![H.to_string()],
+            "a negated lock is still a lock this command must not drop silently"
+        );
+    }
+
+    #[test]
+    fn a_row_with_no_lock_reports_none() {
+        assert!(build_locks_of(&json!("AllowAll")).is_empty());
+        assert!(build_locks_of(&json!({ "Whitelist": { "accounts": ["me.near"] } })).is_empty());
+        assert!(build_locks_of(&json!({ "Logic": { "operator": "Or", "conditions": [] } })).is_empty());
     }
 }
