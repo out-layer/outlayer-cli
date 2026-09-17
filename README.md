@@ -131,6 +131,13 @@ outlayer secrets set '{"API_KEY":"sk-..."}' --wasm-hash abc123...   # the row a 
 outlayer secrets set '{"SIGNING_KEY":"..."}' --project alice.near/oracle --build <sha256>
 outlayer secrets access --project alice.near/oracle --access whitelist:alice.near --build <new sha256>
 
+# Direct calls only: a call reads the row only when the account that CALLS the contract is one the
+# condition names — no other contract in between. Without it, a contract you sign any transaction
+# to can relay a call naming your secret into the project it is bound to, under your name.
+outlayer secrets set '{"SIGNING_KEY":"..."}' --project alice.near/oracle --direct
+outlayer secrets access --project alice.near/oracle --direct --via dao.sputnik-dao.near   # and through this DAO
+outlayer secrets access --project alice.near/oracle --drop-callers                        # remove the rule
+
 # Generate protected secrets in TEE (values never visible)
 outlayer secrets set --generate PROTECTED_MASTER_KEY:hex32
 outlayer secrets set '{"API_KEY":"sk-..."}' --generate PROTECTED_DB:hex64   # mixed

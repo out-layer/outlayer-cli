@@ -294,6 +294,24 @@ enum SecretsCommands {
         /// strips the lock the row carries.
         #[arg(long)]
         drop_build: bool,
+
+        /// Admit a call only when the account that CALLS the contract is one
+        /// the condition names as a reader — no other contract in between. A
+        /// DAO or a router calling on your behalf is refused unless --via
+        /// names it. Replaces any such rule the row carries.
+        #[arg(long)]
+        direct: bool,
+
+        /// Contracts calls may come through — a DAO, a router — comma-separated.
+        /// With --direct, beside the readers; alone, only these.
+        #[arg(long)]
+        via: Option<String>,
+
+        /// Remove the row's calling-account rule. Required to replace such a
+        /// row's condition with --access when neither --direct nor --via is
+        /// given.
+        #[arg(long)]
+        drop_callers: bool,
     },
     /// Leave a secret for an agent to use with one connector
     SetForAgent {
@@ -413,6 +431,21 @@ enum SecretsCommands {
         /// condition with --access when no --build is given.
         #[arg(long)]
         drop_build: bool,
+
+        /// Admit a call only when the account that CALLS the contract is one
+        /// the condition names as a reader — no other contract in between.
+        /// Alone, re-derives the rule from the readers the row keeps.
+        #[arg(long)]
+        direct: bool,
+
+        /// Contracts calls may come through — a DAO, a router — comma-separated.
+        /// With --direct, beside the readers; alone, only these.
+        #[arg(long)]
+        via: Option<String>,
+
+        /// Remove the row's calling-account rule.
+        #[arg(long)]
+        drop_callers: bool,
     },
     /// Delete secrets for a profile
     Delete {
@@ -802,6 +835,9 @@ async fn main() -> anyhow::Result<()> {
                     vault_id,
                     build,
                     drop_build,
+                    direct,
+                    via,
+                    drop_callers,
                 } => {
                     commands::secrets::set(
                         &network,
@@ -817,6 +853,9 @@ async fn main() -> anyhow::Result<()> {
                         vault_id,
                         build.as_deref(),
                         drop_build,
+                        direct,
+                        via.as_deref(),
+                        drop_callers,
                     )
                     .await?
                 }
@@ -884,6 +923,9 @@ async fn main() -> anyhow::Result<()> {
                     access,
                     build,
                     drop_build,
+                    direct,
+                    via,
+                    drop_callers,
                 } => {
                     commands::secrets::access(
                         &network,
@@ -896,6 +938,9 @@ async fn main() -> anyhow::Result<()> {
                         access.as_deref(),
                         build.as_deref(),
                         drop_build,
+                        direct,
+                        via.as_deref(),
+                        drop_callers,
                     )
                     .await?
                 }

@@ -236,6 +236,258 @@ fn build_locks_of(access: &Value) -> Vec<String> {
     out
 }
 
+// ── The calling-account rule ─────────────────────────────────────────
+//
+// `Predecessor{Whitelist[accounts]}` ANDed onto the condition: a call is
+// admitted only when the account that CALLED the contract — the relaying
+// contract, or the signer on a direct call — is one of `accounts`. Every other
+// leaf is judged on the signer, so a contract the owner signs any transaction
+// to can relay a call naming the owner's row. `--direct` names the row's own
+// readers, so each reads only by calling straight in; `--via` names contracts
+// calls may come through as well — a DAO, a router. Written and replaced the
+// way a build lock is: one rule, a direct conjunct of the root AND. A rule
+// under an OR or a NOT is the owner's own composition and is left where it is
+// (lifting it out and re-ANDing it would turn an OR into an AND). Over HTTPS
+// nothing relays a call and the payment key's owner is judged as the caller.
+
+/// Every account the condition names as a reader: the whitelists reachable
+/// through `Logic` nodes — not those under a `Not` (a denylist names nobody),
+/// nor inside a calling-account rule (those are callers, not readers).
+fn named_readers(condition: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    fn walk(node: &Value, out: &mut Vec<String>) {
+        if let Some(accounts) = node.get("Whitelist").and_then(|w| w.get("accounts")).and_then(Value::as_array) {
+            for a in accounts.iter().filter_map(Value::as_str) {
+                if !out.iter().any(|x| x == a) {
+                    out.push(a.to_string());
+                }
+            }
+            return;
+        }
+        if let Some(cs) = node.get("Logic").and_then(|l| l.get("conditions")).and_then(Value::as_array) {
+            cs.iter().for_each(|c| walk(c, out));
+        }
+    }
+    walk(condition, &mut out);
+    out
+}
+
+/// A `Predecessor` holding nothing but a whitelist: its accounts.
+fn plain_callers_of(node: &Value) -> Option<Vec<String>> {
+    node.get("Predecessor")?
+        .get("condition")?
+        .get("Whitelist")?
+        .get("accounts")?
+        .as_array()?
+        .iter()
+        .map(|a| a.as_str().map(str::to_string))
+        .collect()
+}
+
+/// How many `Predecessor` nodes sit anywhere in the tree.
+fn caller_rules_anywhere(node: &Value) -> usize {
+    if node.get("Predecessor").is_some() {
+        return 1;
+    }
+    if let Some(cs) = node.get("Logic").and_then(|l| l.get("conditions")).and_then(Value::as_array) {
+        return cs.iter().map(caller_rules_anywhere).sum();
+    }
+    node.get("Not").and_then(|n| n.get("condition")).map(caller_rules_anywhere).unwrap_or(0)
+}
+
+/// Whether any `Predecessor` sits anywhere in the tree.
+fn has_caller_rule(node: &Value) -> bool {
+    caller_rules_anywhere(node) > 0
+}
+
+/// A calling-account rule these flags cannot own: one under an OR or a NOT,
+/// or one that is not a plain whitelist. `--direct`/`--via` would AND a rule
+/// of their own over it and refuse whatever that branch admitted;
+/// `--drop-callers` would leave it standing. Refused, naming it, rather
+/// than rewritten around.
+fn refuse_a_rule_these_flags_cannot_own(condition: &Value, flag: &str) -> Result<()> {
+    let plain_on_spine = {
+        fn count(node: &Value) -> usize {
+            if plain_callers_of(node).is_some() {
+                return 1;
+            }
+            match node.get("Logic") {
+                Some(logic) if logic.get("operator").and_then(Value::as_str) == Some("And") => logic
+                    .get("conditions")
+                    .and_then(Value::as_array)
+                    .map(|cs| cs.iter().map(count).sum())
+                    .unwrap_or(0),
+                _ => 0,
+            }
+        }
+        count(condition)
+    };
+    if caller_rules_anywhere(condition) > plain_on_spine {
+        anyhow::bail!(
+            "this condition carries a calling-account rule {flag} cannot rewrite — under an OR or a NOT, or \
+             holding something other than a whitelist: {}. Restate the whole condition with --access, or edit \
+             it on the dashboard under Full condition.",
+            format_access(condition)
+        );
+    }
+    Ok(())
+}
+
+/// The accounts of the plain calling-account rules on the root's AND spine,
+/// as the chain returned them.
+fn callers_of(access: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(node: &Value, out: &mut Vec<String>) {
+        if let Some(accounts) = plain_callers_of(node) {
+            out.extend(accounts);
+            return;
+        }
+        if let Some(logic) = node.get("Logic") {
+            if logic.get("operator").and_then(Value::as_str) == Some("And") {
+                if let Some(cs) = logic.get("conditions").and_then(Value::as_array) {
+                    cs.iter().for_each(|c| walk(c, out));
+                }
+            }
+        }
+    }
+    walk(access, &mut out);
+    out
+}
+
+/// The condition with the plain calling-account rules on its AND spine removed
+/// and emptied nodes collapsed; `AllowAll` when nothing remains — a condition
+/// that was only ever such a rule named nobody, so everyone was admitted from
+/// the accounts it allowed.
+fn without_caller_rules(condition: &Value) -> Value {
+    fn prune(node: &Value) -> Option<Value> {
+        if plain_callers_of(node).is_some() {
+            return None;
+        }
+        if let Some(logic) = node.get("Logic") {
+            if logic.get("operator").and_then(Value::as_str) == Some("And") {
+                let kept: Vec<Value> = logic
+                    .get("conditions")
+                    .and_then(Value::as_array)
+                    .map(|cs| cs.iter().filter_map(prune).collect())
+                    .unwrap_or_default();
+                return match kept.len() {
+                    0 => None,
+                    1 => kept.into_iter().next(),
+                    _ => Some(json!({ "Logic": { "operator": "And", "conditions": kept } })),
+                };
+            }
+        }
+        Some(node.clone())
+    }
+    prune(condition).unwrap_or_else(|| json!("AllowAll"))
+}
+
+/// The condition with one calling-account rule naming `accounts`, replacing
+/// any plain rule it carried: `And[condition, Predecessor{Whitelist[accounts]}]`,
+/// or the rule alone over `AllowAll`.
+fn with_callers(condition: &Value, accounts: &[String]) -> Value {
+    let base = without_caller_rules(condition);
+    let rule = json!({ "Predecessor": { "condition": { "Whitelist": { "accounts": accounts } } } });
+    if base == json!("AllowAll") {
+        rule
+    } else {
+        json!({ "Logic": { "operator": "And", "conditions": [base, rule] } })
+    }
+}
+
+/// The calling accounts the flags ask for: with `--direct`, the readers the
+/// condition names; with `--via`, those contracts as well — and with
+/// `--direct` alone, the contracts the row's rule already named beside its
+/// readers, so a grant made with `--access … --direct` does not silently
+/// drop a `--via` given earlier. `None` when neither flag was given. A
+/// condition that names nobody has nobody to require direct calls from, and
+/// says so rather than storing a rule that admits no call.
+fn callers_from_flags(condition: &Value, stored: Option<&Value>, direct: bool, via: Option<&str>) -> Result<Option<Vec<String>>> {
+    if !direct && via.is_none() {
+        return Ok(None);
+    }
+    let named = named_readers(condition);
+    let mut accounts: Vec<String> = if direct { named.clone() } else { Vec::new() };
+    if direct && via.is_none() {
+        // The contracts the STORED rule named beyond the readers it had: the
+        // owner's own `--via` list, carried across an edit that restates who
+        // reads. Read from the stored row rather than from `condition`,
+        // because `--access` builds a fresh tree that carries no rule at all
+        // — and a grant made with `--access … --direct` would otherwise drop
+        // the DAO the owner composes through, silently.
+        if let Some(stored) = stored {
+            let was_reader = named_readers(stored);
+            for a in callers_of(stored) {
+                if !was_reader.contains(&a) && !accounts.contains(&a) {
+                    accounts.push(a);
+                }
+            }
+        }
+    }
+    if let Some(list) = via {
+        for entry in list.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                anyhow::bail!("--via holds an empty entry; use --via dao.near,router.near");
+            }
+            if !accounts.iter().any(|a| a == entry) {
+                accounts.push(entry.to_string());
+            }
+        }
+    }
+    if accounts.is_empty() {
+        anyhow::bail!(
+            "--direct needs a condition that names somebody: this one ({}) names no reader, so there is \
+             nobody to require direct calls from. Name accounts with --access whitelist:…, or the contracts \
+             calls may come through with --via",
+            format_access(condition)
+        );
+    }
+    Ok(Some(accounts))
+}
+
+/// The guard both commands share: `--access` replaces the stored condition,
+/// a calling-account rule included, and losing one is not what someone
+/// changing readers expects.
+fn refuse_silent_caller_rule_loss(stored: Option<&Value>, profile: &str, direct: bool, via: Option<&str>, drop_callers: bool) -> Result<()> {
+    let Some(stored) = stored else { return Ok(()) };
+    if has_caller_rule(stored) && !direct && via.is_none() && !drop_callers {
+        anyhow::bail!(
+            "{profile} is judged on the calling account ({}) and --access would replace that condition, \
+             dropping the rule. Pass --direct and/or --via to keep such a rule on the new condition, or \
+             --drop-callers to remove it deliberately.",
+            format_access(stored)
+        );
+    }
+    Ok(())
+}
+
+/// Apply the calling-account flags to a decided condition. The `bool` says
+/// whether anything changed.
+fn apply_caller_flags(access: Value, stored: Option<&Value>, direct: bool, via: Option<&str>, drop_callers: bool) -> Result<(Value, bool)> {
+    if drop_callers {
+        refuse_a_rule_these_flags_cannot_own(&access, "--drop-callers")?;
+        let stripped = without_caller_rules(&access);
+        let changed = stripped != access;
+        if changed {
+            eprintln!("Calling-account rule removed: {}", format_access(&stripped));
+        }
+        return Ok((stripped, changed));
+    }
+    if direct || via.is_some() {
+        refuse_a_rule_these_flags_cannot_own(&access, if direct { "--direct" } else { "--via" })?;
+    }
+    match callers_from_flags(&access, stored, direct, via)? {
+        None => Ok((access, false)),
+        Some(accounts) => {
+            let ruled = with_callers(&access, &accounts);
+            // Read back off the tree that will be stored, not off the request.
+            eprintln!("Calls admitted only from: {}", callers_of(&ruled).join(", "));
+            Ok((ruled, true))
+        }
+    }
+}
+
 fn parse_access(access_str: &str) -> Result<Value> {
     match access_str {
         "allow-all" | "AllowAll" => Ok(json!("AllowAll")),
@@ -512,8 +764,14 @@ pub async fn set(
     vault_id: Option<String>,
     build: Option<&str>,
     drop_build: bool,
+    direct: bool,
+    via: Option<&str>,
+    drop_callers: bool,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
+    if (direct || via.is_some()) && drop_callers {
+        anyhow::bail!("--direct/--via and --drop-callers ask for opposite things; pass one");
+    }
 
     let mut accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
     let explicit_access = access_str.map(parse_access).transpose()?;
@@ -540,6 +798,9 @@ pub async fn set(
     // refuses THAT, the refusal is about a rule this command never mentioned,
     // so it is worth saying where the rule lives and what fixes it.
     let mut kept_condition = false;
+    // The row as it stands, kept for the calling-account flags: `--direct`
+    // carries the contracts its rule already named across an `--access` edit.
+    let stored_access: Option<Value>;
     let access = match explicit_access {
         // An explicit condition REPLACES the stored one — including any build
         // lock it carried. That is what `--access` means, but losing a lock is
@@ -555,12 +816,12 @@ pub async fn set(
             // branch row exists, and a lock on that row says nothing about the
             // one this command creates — refusing on it would block a write
             // that could not have unlocked anything, naming another row.
-            let locked_to = row
+            stored_access = row
                 .as_ref()
                 .filter(|r| r.get("accessor") == Some(&accessor.contract))
                 .and_then(|r| r.get("access"))
-                .map(build_locks_of)
-                .unwrap_or_default();
+                .cloned();
+            let locked_to = stored_access.as_ref().map(build_locks_of).unwrap_or_default();
             if !locked_to.is_empty() && build.is_none() && !drop_build {
                 anyhow::bail!(
                     "{profile} is locked to build {} and --access would replace that condition, \
@@ -569,6 +830,7 @@ pub async fn set(
                     locked_to[0]
                 );
             }
+            refuse_silent_caller_rule_loss(stored_access.as_ref(), profile, direct, via, drop_callers)?;
             access
         }
         None => {
@@ -580,6 +842,11 @@ pub async fn set(
             // keeps its own condition. Only a row at the very accessor about to
             // be written counts as existing.
             let row = stored_row(&NearClient::new(network), &accessor.contract, profile, &creds.account_id).await?;
+            stored_access = row
+                .as_ref()
+                .filter(|r| r.get("accessor") == Some(&accessor.contract))
+                .and_then(|r| r.get("access"))
+                .cloned();
             let (access, origin) =
                 condition_for_set(row.as_ref(), &accessor.contract, profile, &creds.account_id)?;
             kept_condition = origin == AccessOrigin::Kept;
@@ -603,6 +870,13 @@ pub async fn set(
     if build.is_some() {
         kept_condition = false;
         eprintln!("Locked to build: {}", format_access(&access));
+    }
+    // The calling-account rule goes on last, over everything decided above —
+    // readers, dates, the build lock — so `--direct` names exactly the readers
+    // this row will have.
+    let (access, callers_changed) = apply_caller_flags(access, stored_access.as_ref(), direct, via, drop_callers)?;
+    if callers_changed {
+        kept_condition = false;
     }
 
     let encrypted_data = if generate_specs.is_empty() {
@@ -942,13 +1216,22 @@ pub async fn access(
     access_str: Option<&str>,
     build: Option<&str>,
     drop_build: bool,
+    direct: bool,
+    via: Option<&str>,
+    drop_callers: bool,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
-    if access_str.is_none() && build.is_none() && !drop_build {
-        anyhow::bail!("nothing to change: pass --access to set who may read, --build to move the lock, --drop-build to remove it, or a combination");
+    if access_str.is_none() && build.is_none() && !drop_build && !direct && via.is_none() && !drop_callers {
+        anyhow::bail!(
+            "nothing to change: pass --access to set who may read, --build / --drop-build for the build lock, \
+             --direct / --via / --drop-callers for the calling-account rule, or a combination"
+        );
     }
     if build.is_some() && drop_build {
         anyhow::bail!("--build and --drop-build ask for opposite things; pass one");
+    }
+    if (direct || via.is_some()) && drop_callers {
+        anyhow::bail!("--direct/--via and --drop-callers ask for opposite things; pass one");
     }
 
     let mut accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
@@ -991,6 +1274,7 @@ pub async fn access(
                     stored_locks[0]
                 );
             }
+            refuse_silent_caller_rule_loss(row.get("access"), profile, direct, via, drop_callers)?;
             parse_access(text)?
         }
         None => row
@@ -1003,6 +1287,12 @@ pub async fn access(
     } else {
         lock_to_build(base, build)?
     };
+    // `--direct` alone re-derives the rule from the readers the row keeps, so
+    // a grant or a revocation made with `--access` is followed by the rule.
+    let (new_access, callers_changed) = apply_caller_flags(new_access, row.get("access"), direct, via, drop_callers)?;
+    if drop_callers && !callers_changed && access_str.is_none() && build.is_none() && !drop_build {
+        anyhow::bail!("{profile} carries no calling-account rule to drop — nothing to change");
+    }
     eprintln!("Access: {}", format_access(&new_access));
 
     // A condition is stored bytes, and the contract re-prices the row on every
@@ -1631,6 +1921,12 @@ fn format_access(access: &Value) -> String {
     }
     if let Some(hash) = obj.get("WasmHash").and_then(|w| w.get("hash")).and_then(Value::as_str) {
         return format!("build:{hash}");
+    }
+    if let Some(accounts) = plain_callers_of(access) {
+        return format!("from:{}", accounts.join(","));
+    }
+    if let Some(inner) = obj.get("Predecessor").and_then(|p| p.get("condition")) {
+        return format!("from:({})", format_access(inner));
     }
     for chain_answered in ["NearBalance", "FtBalance", "NftOwned", "DaoMember"] {
         if let Some(inner) = obj.get(chain_answered) {
@@ -2475,5 +2771,149 @@ mod a_stored_lock_is_seen_before_it_is_replaced {
         assert!(build_locks_of(&json!("AllowAll")).is_empty());
         assert!(build_locks_of(&json!({ "Whitelist": { "accounts": ["me.near"] } })).is_empty());
         assert!(build_locks_of(&json!({ "Logic": { "operator": "Or", "conditions": [] } })).is_empty());
+    }
+}
+
+/// The calling-account rule as `--direct` / `--via` / `--drop-callers` write
+/// it: one rule on the AND spine, replaced rather than nested, naming the
+/// readers and the contracts asked for — and never lifted out of an OR or a
+/// NOT the owner composed.
+#[cfg(test)]
+mod the_calling_account_rule_is_written_once_and_read_back {
+    use super::*;
+
+    fn wl(accounts: &[&str]) -> Value {
+        json!({ "Whitelist": { "accounts": accounts } })
+    }
+    fn via(inner: Value) -> Value {
+        json!({ "Predecessor": { "condition": inner } })
+    }
+    fn and(conditions: Vec<Value>) -> Value {
+        json!({ "Logic": { "operator": "And", "conditions": conditions } })
+    }
+    fn or(conditions: Vec<Value>) -> Value {
+        json!({ "Logic": { "operator": "Or", "conditions": conditions } })
+    }
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn direct_names_the_readers_and_via_adds_contracts() {
+        let readers = or(vec![wl(&["me.near"]), and(vec![wl(&["agent.near"]), json!({ "ValidUntil": { "until_ns": "9" } })])]);
+        assert_eq!(callers_from_flags(&readers, None, true, None).unwrap(), Some(s(&["me.near", "agent.near"])));
+        assert_eq!(callers_from_flags(&readers, None, true, Some("dao.near, me.near")).unwrap(), Some(s(&["me.near", "agent.near", "dao.near"])));
+        assert_eq!(callers_from_flags(&readers, None, false, Some("dao.near")).unwrap(), Some(s(&["dao.near"])));
+        assert_eq!(callers_from_flags(&readers, None, false, None).unwrap(), None);
+        let err = callers_from_flags(&json!("AllowAll"), None, true, None).unwrap_err().to_string();
+        assert!(err.contains("names no reader"), "{err}");
+        assert!(callers_from_flags(&readers, None, false, Some("a.near,,b.near")).is_err(), "an empty entry is refused");
+    }
+
+    #[test]
+    fn the_rule_is_written_once_and_replaced_not_nested() {
+        let once = with_callers(&wl(&["me.near"]), &s(&["me.near"]));
+        assert_eq!(once, and(vec![wl(&["me.near"]), via(wl(&["me.near"]))]));
+        let again = with_callers(&once, &s(&["me.near", "dao.near"]));
+        assert_eq!(again, and(vec![wl(&["me.near"]), via(wl(&["me.near", "dao.near"]))]));
+        assert_eq!(callers_of(&again), s(&["me.near", "dao.near"]));
+        assert_eq!(without_caller_rules(&again), wl(&["me.near"]));
+        assert_eq!(with_callers(&json!("AllowAll"), &s(&["me.near"])), via(wl(&["me.near"])));
+        assert_eq!(without_caller_rules(&via(wl(&["me.near"]))), json!("AllowAll"));
+    }
+
+    #[test]
+    fn a_build_lock_and_the_rule_coexist() {
+        let locked = lock_to_build(wl(&["me.near"]), Some(&"a".repeat(64))).unwrap();
+        let both = with_callers(&locked, &s(&["me.near"]));
+        assert_eq!(build_locks_of(&both), vec!["a".repeat(64)]);
+        assert_eq!(callers_of(&both), s(&["me.near"]));
+        // Moving the lock keeps the rule; re-deriving the rule keeps the lock.
+        let moved = lock_to_build(both.clone(), Some(&"b".repeat(64))).unwrap();
+        assert_eq!(callers_of(&moved), s(&["me.near"]));
+        assert_eq!(build_locks_of(&with_callers(&moved, &s(&["me.near", "dao.near"]))), vec!["b".repeat(64)]);
+    }
+
+    /// A rule under an OR or a NOT is the owner's composition: these flags
+    /// neither rewrite around it nor drop it — they refuse, naming it.
+    #[test]
+    fn a_rule_under_an_or_or_a_not_refuses_the_flags() {
+        let composed = or(vec![wl(&["me.near"]), via(wl(&["dao.near"]))]);
+        assert!(callers_of(&composed).is_empty(), "not on the spine, so not a rule this command owns");
+        assert!(has_caller_rule(&composed), "but it is there, and --access must not drop it unasked");
+        assert_eq!(without_caller_rules(&composed), composed);
+        for (direct, via_arg, drop) in [(true, None, false), (false, Some("x.near"), false), (false, None, true)] {
+            let err = apply_caller_flags(composed.clone(), None, direct, via_arg, drop).unwrap_err().to_string();
+            assert!(err.contains("cannot rewrite"), "{err}");
+        }
+        let negated = and(vec![wl(&["me.near"]), json!({ "Not": { "condition": via(wl(&["deputy.near"])) } })]);
+        assert!(apply_caller_flags(negated.clone(), None, true, None, false).is_err());
+        let dao_inside = and(vec![wl(&["me.near"]), via(json!({ "DaoMember": { "dao_contract": "d.near", "role": "council" } }))]);
+        assert!(apply_caller_flags(dao_inside, None, true, None, false).is_err(), "not a whitelist inside");
+        // A plain rule on the spine beside nothing else is owned, and rewritten.
+        let owned = and(vec![wl(&["me.near"]), via(wl(&["me.near"]))]);
+        assert!(apply_caller_flags(owned.clone(), None, true, Some("dao.near"), false).is_ok());
+        assert_eq!(apply_caller_flags(owned, None, false, None, true).unwrap(), (wl(&["me.near"]), true));
+        assert_eq!(apply_caller_flags(wl(&["me.near"]), None, false, None, true).unwrap().1, false, "nothing to drop, nothing changed");
+    }
+
+    /// `--direct` alone keeps the contracts a `--via` named earlier; `--via`
+    /// given again restates them.
+    #[test]
+    fn direct_alone_keeps_the_via_contracts_the_row_already_names() {
+        let stored = and(vec![wl(&["me.near"]), via(wl(&["me.near", "dao.near"]))]);
+        assert_eq!(callers_from_flags(&stored, Some(&stored), true, None).unwrap(), Some(s(&["me.near", "dao.near"])));
+        // The case the live run caught: `--access` builds a FRESH tree that
+        // carries no rule, so the DAO can only come from the stored row.
+        let restated = wl(&["me.near", "agent.near"]);
+        assert_eq!(
+            callers_from_flags(&restated, Some(&stored), true, None).unwrap(),
+            Some(s(&["me.near", "agent.near", "dao.near"])),
+            "a grant restated with --access must not drop the via contracts"
+        );
+        // With no stored row there is nothing to carry.
+        assert_eq!(callers_from_flags(&restated, None, true, None).unwrap(), Some(s(&["me.near", "agent.near"])));
+        // An account that WAS a reader and is revoked is not mistaken for a via contract.
+        let had_agent = and(vec![wl(&["me.near", "agent.near"]), via(wl(&["me.near", "agent.near"]))]);
+        assert_eq!(callers_from_flags(&wl(&["me.near"]), Some(&had_agent), true, None).unwrap(), Some(s(&["me.near"])));
+        // --via restates the list of contracts.
+        assert_eq!(callers_from_flags(&stored, Some(&stored), true, Some("router.near")).unwrap(), Some(s(&["me.near", "router.near"])));
+        // --via alone names only contracts, whatever the row had.
+        assert_eq!(callers_from_flags(&stored, Some(&stored), false, Some("router.near")).unwrap(), Some(s(&["router.near"])));
+    }
+
+    #[test]
+    fn readers_are_the_whitelists_not_the_callers_nor_a_denylist() {
+        let tree = and(vec![
+            or(vec![wl(&["me.near"]), wl(&["agent.near"])]),
+            json!({ "Not": { "condition": wl(&["banned.near"]) } }),
+            via(wl(&["dao.near"])),
+        ]);
+        assert_eq!(named_readers(&tree), s(&["me.near", "agent.near"]));
+    }
+
+    #[test]
+    fn the_guard_refuses_a_silent_loss_and_the_flags_lift_it() {
+        let stored = and(vec![wl(&["me.near"]), via(wl(&["me.near"]))]);
+        let err = refuse_silent_caller_rule_loss(Some(&stored), "p", false, None, false).unwrap_err().to_string();
+        assert!(err.contains("--drop-callers"), "{err}");
+        assert!(refuse_silent_caller_rule_loss(Some(&stored), "p", true, None, false).is_ok());
+        assert!(refuse_silent_caller_rule_loss(Some(&stored), "p", false, Some("dao.near"), false).is_ok());
+        assert!(refuse_silent_caller_rule_loss(Some(&stored), "p", false, None, true).is_ok());
+        assert!(refuse_silent_caller_rule_loss(Some(&wl(&["me.near"])), "p", false, None, false).is_ok());
+        assert!(refuse_silent_caller_rule_loss(None, "p", false, None, false).is_ok());
+    }
+
+    #[test]
+    fn the_rule_reads_back_as_from() {
+        assert_eq!(format_access(&via(wl(&["me.near", "dao.near"]))), "from:me.near,dao.near");
+        assert_eq!(
+            format_access(&and(vec![wl(&["me.near"]), via(wl(&["me.near"]))])),
+            "(whitelist:me.near and from:me.near)"
+        );
+        assert_eq!(
+            format_access(&via(json!({ "DaoMember": { "dao_contract": "d.near", "role": "council" } }))),
+            r#"from:(DaoMember{"dao_contract":"d.near","role":"council"})"#
+        );
     }
 }
