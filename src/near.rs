@@ -83,12 +83,25 @@ impl NearClient {
         method: &str,
         args: Value,
     ) -> Result<T> {
+        self.view_call_at(contract_id, method, args, Finality::Final).await
+    }
+
+    /// A view at the given finality. `Final` for anything shown to a person;
+    /// `None` (optimistic) where a value this process just wrote must be seen
+    /// at once — see [`Self::get_next_payment_key_nonce`].
+    async fn view_call_at<T: serde::de::DeserializeOwned>(
+        &self,
+        contract_id: &str,
+        method: &str,
+        args: Value,
+        finality: Finality,
+    ) -> Result<T> {
         let account_id: AccountId = contract_id
             .parse()
             .with_context(|| format!("Invalid contract_id '{contract_id}'"))?;
 
         let request = methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
+            block_reference: BlockReference::Finality(finality),
             request: near_primitives::views::QueryRequest::CallFunction {
                 account_id,
                 method_name: method.to_string(),
@@ -265,11 +278,17 @@ impl NearClient {
         Ok(result)
     }
 
+    /// The next free payment-key nonce, read at OPTIMISTIC finality: a final
+    /// read lags the head by a block or two, so a `keys create` right after
+    /// another would be handed the nonce that create just took, and write the
+    /// new key over the live one in the local store.
     pub async fn get_next_payment_key_nonce(&self, account_id: &str) -> Result<u32> {
         let result: u32 = self
-            .view_call(
+            .view_call_at(
+                &self.network.contract_id,
                 "get_next_payment_key_nonce",
                 serde_json::json!({ "account_id": account_id }),
+                Finality::None,
             )
             .await?;
         Ok(result)
