@@ -225,30 +225,38 @@ outlayer checks create 17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e
   --memo "Payment for task" --expires-in 86400
 
 # Claim (full)
-outlayer checks claim ed25519:5Kd3NBU...
+outlayer checks claim 9f8a7b6c...64-hex-key
 
 # Partial claim (take 0.5 USDC out of 1 USDC)
-outlayer checks claim ed25519:5Kd3NBU... --amount 500000
+outlayer checks claim 9f8a7b6c...64-hex-key --amount 500000
 
 # Reclaim (sender takes back)
-outlayer checks reclaim pc_a1b2c3d4e5f6
+outlayer checks reclaim 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
 
 # Partial reclaim
-outlayer checks reclaim pc_a1b2c3d4e5f6 --amount 300000
+outlayer checks reclaim 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d --amount 300000
 
 # Check status
-outlayer checks status pc_a1b2c3d4e5f6
+outlayer checks status 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
 
 # List unclaimed checks
 outlayer checks list --status unclaimed
 
 # Peek at check balance before claiming
-outlayer checks peek ed25519:5Kd3NBU...
+outlayer checks peek 9f8a7b6c...64-hex-key
 
 # Batch create from JSON
 outlayer checks batch-create --file checks.json
 # checks.json format: [{"token":"...","amount":"...","memo":"...","expires_in":86400}, ...]
 ```
+
+A transfer the solver relay does not confirm in time is not an error. `create`
+prints `status: creating` — the `check_key` is printed too, keep it — and
+`claim` / `reclaim` print `status: processing` with the request to poll. The
+transfer settles on its own; do not run the command again. `checks status`
+shows the check moving on (`creating` → `unclaimed`, or `failed` if the funding
+never executed and nothing moved). A batch that stops part way prints the checks
+it created and exits with the reason the rest were not.
 
 ### Upload (FastFS)
 

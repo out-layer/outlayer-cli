@@ -32,6 +32,9 @@ pub async fn create(
 
     println!("check_id:  {}", resp.check_id);
     println!("check_key: {}", resp.check_key);
+    if let Some(status) = &resp.status {
+        println!("status:    {}", status);
+    }
     println!("token:     {}", resp.token);
     println!("amount:    {}", resp.amount);
     if let Some(memo) = &resp.memo {
@@ -43,6 +46,14 @@ pub async fn create(
     }
 
     eprintln!("\nSave the check_key — it is shown only once. Send it to the recipient.");
+    if resp.status.as_deref() == Some("creating") {
+        eprintln!(
+            "The funding transfer is not confirmed yet. Do not create the check again; \
+             watch it with `outlayer checks status {}` until it reads `unclaimed` \
+             (or `failed`: nothing moved).",
+            resp.check_id
+        );
+    }
 
     Ok(())
 }
@@ -76,6 +87,9 @@ pub async fn batch_create(
         println!("--- Check {} ---", i + 1);
         println!("check_id:  {}", check.check_id);
         println!("check_key: {}", check.check_key);
+        if let Some(status) = &check.status {
+            println!("status:    {}", status);
+        }
         println!("amount:    {}", check.amount);
         if let Some(memo) = &check.memo {
             println!("memo:      {}", memo);
@@ -83,6 +97,21 @@ pub async fn batch_create(
     }
 
     eprintln!("\nSave all check_keys — they are shown only once.");
+    if resp.checks.iter().any(|c| c.status.as_deref() == Some("creating")) {
+        eprintln!(
+            "Checks marked `creating` are not confirmed yet: watch them with \
+             `outlayer checks status <check_id>`; do not create them again."
+        );
+    }
+    if let Some(error) = &resp.error {
+        // The checks above exist; the rest of the file does not.
+        anyhow::bail!(
+            "The batch stopped after {} of {} checks: {}",
+            resp.checks.len(),
+            checks.len(),
+            error
+        );
+    }
 
     Ok(())
 }
@@ -105,17 +134,46 @@ pub async fn claim(
 
     let resp = api.claim_payment_check(&key, check_key, amount).await?;
 
+    if let Some(status) = &resp.status {
+        println!("status:    {}", status);
+    }
     println!("token:     {}", resp.token);
     println!("claimed:   {}", resp.amount_claimed);
-    println!("remaining: {}", resp.remaining);
+    if let Some(remaining) = &resp.remaining {
+        println!("remaining: {}", remaining);
+    }
     if let Some(memo) = &resp.memo {
         println!("memo:      {}", memo);
     }
-    println!("time:      {}", resp.claimed_at);
+    if let Some(time) = &resp.claimed_at {
+        println!("time:      {}", time);
+    }
 
-    eprintln!("\nFunds landed in your intents balance.");
+    if resp.status.as_deref() == Some("processing") {
+        print_pending(resp.request_id.as_deref(), resp.poll_url.as_deref());
+        eprintln!(
+            "Do not claim again while it is pending. `outlayer checks peek <check_key>` \
+             shows what the check still holds."
+        );
+    } else {
+        eprintln!("\nFunds landed in your intents balance.");
+    }
 
     Ok(())
+}
+
+/// A transfer handed over and not confirmed yet: not an error, and not to be retried.
+fn print_pending(request_id: Option<&str>, poll_url: Option<&str>) {
+    if let Some(id) = request_id {
+        println!("request:   {}", id);
+    }
+    if let Some(url) = poll_url {
+        println!("poll:      {}", url);
+    }
+    eprintln!(
+        "\nThe transfer was handed over and is not confirmed yet. It settles on its own; \
+         poll the request above until it reads `completed` (or `failed`: nothing moved)."
+    );
 }
 
 /// `outlayer checks reclaim <check_id>`
@@ -136,12 +194,27 @@ pub async fn reclaim(
 
     let resp = api.reclaim_payment_check(&key, check_id, amount).await?;
 
+    if let Some(status) = &resp.status {
+        println!("status:    {}", status);
+    }
     println!("token:     {}", resp.token);
     println!("reclaimed: {}", resp.amount_reclaimed);
-    println!("remaining: {}", resp.remaining);
-    println!("time:      {}", resp.reclaimed_at);
+    if let Some(remaining) = &resp.remaining {
+        println!("remaining: {}", remaining);
+    }
+    if let Some(time) = &resp.reclaimed_at {
+        println!("time:      {}", time);
+    }
 
-    eprintln!("\nFunds returned to your intents balance.");
+    if resp.status.as_deref() == Some("processing") {
+        print_pending(resp.request_id.as_deref(), resp.poll_url.as_deref());
+        eprintln!(
+            "Do not reclaim again while it is pending; `outlayer checks status {}` shows the check.",
+            check_id
+        );
+    } else {
+        eprintln!("\nFunds returned to your intents balance.");
+    }
 
     Ok(())
 }

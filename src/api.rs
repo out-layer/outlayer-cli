@@ -1044,37 +1044,65 @@ pub struct WalletCallResponse {
 pub struct PaymentCheckCreateResponse {
     pub check_id: String,
     pub check_key: String,
+    /// `unclaimed`, or `creating` while the funding transfer is unconfirmed.
+    /// Absent from a coordinator that predates it.
+    #[serde(default)]
+    pub status: Option<String>,
     pub token: String,
     pub amount: String,
     pub memo: Option<String>,
     pub created_at: String,
     pub expires_at: Option<String>,
+    #[serde(default)]
+    pub poll_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PaymentCheckBatchCreateResponse {
     pub checks: Vec<PaymentCheckCreateResponse>,
+    /// Why the batch stopped before its last check; the checks listed were created.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct PaymentCheckClaimResponse {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// The check's status after the claim, or `processing` while the transfer is
+    /// unconfirmed (then `remaining` and `claimed_at` are absent).
+    #[serde(default)]
+    pub status: Option<String>,
     pub token: String,
     pub amount_claimed: String,
-    pub remaining: String,
+    #[serde(default)]
+    pub remaining: Option<String>,
     pub memo: Option<String>,
-    pub claimed_at: String,
+    #[serde(default)]
+    pub claimed_at: Option<String>,
     pub intent_hash: Option<String>,
+    #[serde(default)]
+    pub poll_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct PaymentCheckReclaimResponse {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// As for a claim: the check's status after it, or `processing`.
+    #[serde(default)]
+    pub status: Option<String>,
     pub token: String,
     pub amount_reclaimed: String,
-    pub remaining: String,
-    pub reclaimed_at: String,
+    #[serde(default)]
+    pub remaining: Option<String>,
+    #[serde(default)]
+    pub reclaimed_at: Option<String>,
     pub intent_hash: Option<String>,
+    #[serde(default)]
+    pub poll_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1253,4 +1281,47 @@ pub struct PreparedAgentSecretDelete {
     pub args: Value,
     pub gas: String,
     pub agent_account: String,
+}
+
+#[cfg(test)]
+mod payment_check_tests {
+    use super::*;
+
+    /// A coordinator from before checks settled past their call answers
+    /// without `status`; one after can answer `processing` without the
+    /// settled-only fields. The CLI reads both.
+    #[test]
+    fn claim_answers_from_either_coordinator_parse() {
+        let old: PaymentCheckClaimResponse = serde_json::from_str(
+            r#"{"token":"t","amount_claimed":"5","remaining":"0","claimed_at":"2026-10-03T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.remaining.as_deref(), Some("0"));
+        assert!(old.status.is_none());
+
+        let pending: PaymentCheckClaimResponse = serde_json::from_str(
+            r#"{"request_id":"r","status":"processing","token":"t","amount_claimed":"5","poll_url":"/wallet/v1/requests/r"}"#,
+        )
+        .unwrap();
+        assert_eq!(pending.status.as_deref(), Some("processing"));
+        assert!(pending.remaining.is_none() && pending.claimed_at.is_none());
+
+        let pending: PaymentCheckReclaimResponse = serde_json::from_str(
+            r#"{"request_id":"r","status":"processing","token":"t","amount_reclaimed":"5","poll_url":"/wallet/v1/requests/r"}"#,
+        )
+        .unwrap();
+        assert!(pending.remaining.is_none() && pending.reclaimed_at.is_none());
+    }
+
+    #[test]
+    fn a_check_still_being_funded_parses_with_its_key() {
+        let created: PaymentCheckCreateResponse = serde_json::from_str(
+            r#"{"check_id":"c","check_key":"k","status":"creating","token":"t","amount":"5","created_at":"x","poll_url":"/p"}"#,
+        )
+        .unwrap();
+        assert_eq!((created.check_key.as_str(), created.status.as_deref()), ("k", Some("creating")));
+        let batch: PaymentCheckBatchCreateResponse =
+            serde_json::from_str(r#"{"checks":[],"error":"stopped at check 0"}"#).unwrap();
+        assert!(batch.error.is_some());
+    }
 }
