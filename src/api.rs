@@ -764,6 +764,46 @@ impl ApiClient {
             .context("Failed to parse the agent secret pubkey response")
     }
 
+    /// `POST /wallet/v1/sponsorship` — redeem a sponsor code for the wallet
+    /// `wallet_key` runs.
+    pub async fn redeem_sponsor_code(
+        &self,
+        wallet_key: &str,
+        code: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let request = self
+            .client
+            .post(format!("{}/wallet/v1/sponsorship", self.base_url))
+            .json(&serde_json::json!({ "code": code }));
+        Self::wallet_json(request, wallet_key).await
+    }
+
+    /// `GET /wallet/v1/payment-key` — the wallet's nonce-0 key, read again.
+    pub async fn get_nonce0_payment_key(
+        &self,
+        wallet_key: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let request = self.client.get(format!("{}/wallet/v1/payment-key", self.base_url));
+        Self::wallet_json(request, wallet_key).await
+    }
+
+    /// Send `request` as the wallet `wallet_key` runs and answer the status
+    /// with the JSON body whatever the status, so the caller reads `reason`
+    /// off a refusal.
+    async fn wallet_json(
+        request: reqwest::RequestBuilder,
+        wallet_key: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let response = request
+            .header("Authorization", format!("Bearer {}", wallet_key))
+            .send()
+            .await
+            .context("Failed to reach the coordinator")?;
+        let status = response.status();
+        let body = response.json().await.unwrap_or(serde_json::Value::Null);
+        Ok((status, body))
+    }
+
     /// `POST /wallet/v1/agent-secret` — store it, with the agent's own
     /// wallet paying the storage deposit.
     pub async fn store_agent_secret(

@@ -204,6 +204,18 @@ Payment keys are required for HTTPS API calls. Created separately (requires USDC
 | `outlayer keys balance <nonce>` | Check key balance |
 | `outlayer keys topup <nonce> <amount>` | Top up with NEAR (mainnet, swaps to USDC) |
 | `outlayer keys delete <nonce>` | Delete key (refunds storage) |
+| `outlayer keys trial-key [--api-key wk_...]` | Print a custody wallet's nonce-0 key (trial or sponsored); it is derived, so it is read again rather than stored |
+
+### Sponsor codes
+
+A sponsor code (`spn_...`) puts a subscription on a custody wallet's nonce-0 key, paid by whoever gave you the code. The key is created if the wallet has none; the trial, if claimed, is converted.
+
+```bash
+outlayer redeem spn_... --api-key wk_...     # or OUTLAYER_WALLET_KEY
+KEY=$(outlayer redeem spn_...)               # stdout is the payment key alone
+```
+
+A code that cannot be redeemed answers `sponsor_code_invalid`, whatever the reason — ask whoever gave it. `sponsor_cannot_top_up` means the key already holds more than the code gives. A key carries one sponsor while its grant is live; once it ends, another code can be redeemed.
 
 ### Payment Checks (Agent-to-Agent)
 
@@ -341,6 +353,7 @@ payment_key_nonce = 1
 | `OUTLAYER_HOME` | Config directory (default: `~/.outlayer`) |
 | `OUTLAYER_NETWORK` | Network: `mainnet` or `testnet` |
 | `PAYMENT_KEY` | Payment key for `outlayer run` (format: `owner:nonce:secret`) |
+| `OUTLAYER_WALLET_KEY` | Custody wallet API key (`wk_...`) for `checks`, `redeem` and `keys trial-key` |
 
 ## Testing
 

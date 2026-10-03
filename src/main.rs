@@ -180,6 +180,15 @@ enum Commands {
         #[arg(long, global = true)]
         api_key: Option<String>,
     },
+    /// Redeem a sponsor code (spn_...): a subscription on the wallet's nonce-0 key
+    Redeem {
+        /// The code, as given
+        code: String,
+
+        /// Wallet API key (or set OUTLAYER_WALLET_KEY env var)
+        #[arg(long)]
+        api_key: Option<String>,
+    },
     /// View execution history
     Logs {
         /// Payment key nonce (defaults to outlayer.toml config)
@@ -233,6 +242,12 @@ enum KeysCommands {
     Delete {
         /// Payment key nonce
         nonce: u32,
+    },
+    /// Print a custody wallet's nonce-0 key (trial or sponsored), derived again
+    TrialKey {
+        /// Wallet API key (or set OUTLAYER_WALLET_KEY env var)
+        #[arg(long)]
+        api_key: Option<String>,
     },
 }
 
@@ -758,7 +773,14 @@ async fn main() -> anyhow::Result<()> {
                 KeysCommands::Delete { nonce } => {
                     commands::keys::delete(&network, nonce).await?
                 }
+                KeysCommands::TrialKey { api_key } => {
+                    commands::redeem::show_nonce0(&network, api_key.as_deref()).await?
+                }
             }
+        }
+        Commands::Redeem { code, api_key } => {
+            let network = resolve_with_project(env_net)?;
+            commands::redeem::redeem(&network, api_key.as_deref(), &code).await?;
         }
         Commands::Checks { command, api_key } => {
             let network = resolve_with_project(env_net)?;

@@ -7,6 +7,7 @@ pub mod earnings;
 pub mod keys;
 pub mod logs;
 pub mod projects;
+pub mod redeem;
 pub mod run;
 pub mod secrets;
 pub mod status;
