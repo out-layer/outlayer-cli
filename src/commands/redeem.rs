@@ -61,22 +61,13 @@ pub async fn redeem(network: &NetworkConfig, api_key: Option<&str>, code: &str) 
         eprintln!();
         eprintln!("  {note}");
     }
-    match body["payment_key"].as_str() {
-        Some(payment_key) => {
-            eprintln!();
-            eprintln!("Payment key (send as X-Payment-Key; `outlayer keys trial-key` reads it again):");
-            // Alone on stdout, so `$(outlayer redeem …)` captures just the key.
-            println!("{payment_key}");
-        }
-        None => {
-            eprintln!();
-            eprintln!(
-                "The grant is on this wallet's nonce-0 key, but this credential cannot read the \
-                 key: it was claimed with another of the wallet's credentials, or drawn at \
-                 random. That credential, or the copy you kept, carries the subscription."
-            );
-        }
-    }
+    let payment_key = body["payment_key"]
+        .as_str()
+        .context("The coordinator answered without a payment_key")?;
+    eprintln!();
+    eprintln!("Payment key (send as X-Payment-Key; `outlayer keys trial-key` reads it again):");
+    // Alone on stdout, so `$(outlayer redeem …)` captures just the key.
+    println!("{payment_key}");
     Ok(())
 }
 
