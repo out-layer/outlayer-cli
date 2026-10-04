@@ -188,6 +188,11 @@ enum Commands {
         /// Wallet API key (or set OUTLAYER_WALLET_KEY env var)
         #[arg(long)]
         api_key: Option<String>,
+
+        /// The wallet's nonce-0 key (owner:0:key) when it was issued at random
+        /// and cannot be read again — the proof that binds it to this wallet key
+        #[arg(long)]
+        payment_key: Option<String>,
     },
     /// View execution history
     Logs {
@@ -778,9 +783,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Redeem { code, api_key } => {
+        Commands::Redeem { code, api_key, payment_key } => {
             let network = resolve_with_project(env_net)?;
-            commands::redeem::redeem(&network, api_key.as_deref(), &code).await?;
+            commands::redeem::redeem(&network, api_key.as_deref(), &code, payment_key.as_deref()).await?;
         }
         Commands::Checks { command, api_key } => {
             let network = resolve_with_project(env_net)?;

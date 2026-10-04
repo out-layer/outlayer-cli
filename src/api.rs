@@ -765,16 +765,21 @@ impl ApiClient {
     }
 
     /// `POST /wallet/v1/sponsorship` — redeem a sponsor code for the wallet
-    /// `wallet_key` runs.
+    /// `wallet_key` runs. `held_key` is the wallet's nonce-0 key when it was
+    /// issued at random: sent as `X-Payment-Key`, it proves the caller holds it.
     pub async fn redeem_sponsor_code(
         &self,
         wallet_key: &str,
         code: &str,
+        held_key: Option<&str>,
     ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
-        let request = self
+        let mut request = self
             .client
             .post(format!("{}/wallet/v1/sponsorship", self.base_url))
             .json(&serde_json::json!({ "code": code }));
+        if let Some(held) = held_key {
+            request = request.header("X-Payment-Key", held);
+        }
         Self::wallet_json(request, wallet_key).await
     }
 

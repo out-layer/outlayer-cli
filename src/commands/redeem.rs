@@ -7,7 +7,9 @@
 //! `--api-key`, then `OUTLAYER_WALLET_KEY`.
 //!
 //! The nonce-0 key is derived by the keystore, so it is never written to disk
-//! here: `outlayer keys trial-key` reads it again on request.
+//! here: `outlayer keys trial-key` reads it again on request. A key issued at
+//! random, before keys were derived, cannot be read again; `--payment-key`
+//! sends it with the redeem, which moves the slot to a derived key.
 
 use anyhow::{Context, Result};
 
@@ -39,14 +41,24 @@ fn usd(minimal: &str) -> String {
 }
 
 /// `outlayer redeem <code>`
-pub async fn redeem(network: &NetworkConfig, api_key: Option<&str>, code: &str) -> Result<()> {
+pub async fn redeem(
+    network: &NetworkConfig,
+    api_key: Option<&str>,
+    code: &str,
+    held_key: Option<&str>,
+) -> Result<()> {
     let key = resolve_wallet_key(api_key)?;
     let api = ApiClient::new(network);
 
     eprintln!("Redeeming the sponsor code...");
-    let (status, body) = api.redeem_sponsor_code(&key, code.trim()).await?;
+    let (status, body) = api.redeem_sponsor_code(&key, code.trim(), held_key.map(str::trim)).await?;
     if !status.is_success() {
-        anyhow::bail!("The code was not redeemed: {}", refusal(status, &body));
+        let hint = if body["reason"].as_str() == Some("payment_key_not_recoverable") && held_key.is_none() {
+            "\nThis wallet's nonce-0 key was issued at random. Pass it with --payment-key <owner:0:key> to redeem onto it."
+        } else {
+            ""
+        };
+        anyhow::bail!("The code was not redeemed: {}{hint}", refusal(status, &body));
     }
 
     let sponsor = body["sponsor"].as_str().unwrap_or("?");

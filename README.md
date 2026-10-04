@@ -215,7 +215,7 @@ outlayer redeem spn_... --api-key wk_...     # or OUTLAYER_WALLET_KEY
 KEY=$(outlayer redeem spn_...)               # stdout is the payment key alone
 ```
 
-A code that cannot be redeemed answers `sponsor_code_invalid`, whatever the reason — ask whoever gave it. `sponsor_cannot_top_up` means the key already holds more than the code gives. A key carries one sponsor while its grant is live; once it ends, another code can be redeemed.
+A code that cannot be redeemed answers `sponsor_code_invalid`, whatever the reason — ask whoever gave it. `sponsor_cannot_top_up` means the key already holds more than the code gives. A key carries one sponsor while its grant is live; once it ends, another code can be redeemed — never one this wallet redeemed before. A nonce-0 key issued at random before keys were derived (`payment_key_not_recoverable`) redeems with `--payment-key <owner:0:key>`; the answer is the derived key that replaces it.
 
 ### Payment Checks (Agent-to-Agent)
 
