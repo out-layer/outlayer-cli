@@ -82,10 +82,9 @@ outlayer run alice.near/my-agent '{"command": "hello"}'
 | `outlayer status [call_id]` | Project info or poll async call |
 
 A version is a published `.wasm`, named by its sha256: what a caller runs and pays for is
-exactly the file you deployed, and it cannot change under that version afterwards. OutLayer
-does not build from git repositories. To build the way the platform used to — the same pinned
-Docker image, reproducible — use `scripts/build_github_wasm.sh` from the
-[OutLayer repository](https://github.com/out-layer/outlayer).
+exactly the file you deployed, and it cannot change under that version afterwards. For a
+reproducible build — the same pinned Docker image, the same hash on every machine — use
+`scripts/build_github_wasm.sh` from the [OutLayer repository](https://github.com/out-layer/outlayer).
 
 ```bash
 # Run from project (uses payment key if available, else on-chain NEAR)
@@ -124,7 +123,7 @@ outlayer projects bob.near
 outlayer secrets set '{"API_KEY":"sk-...","DB_URL":"postgres://..."}'
 outlayer secrets set '{"API_KEY":"sk-..."}' --project alice.near/my-agent
 outlayer secrets set '{"API_KEY":"sk-..."}' --wasm-hash abc123...   # the row a raw WASM URL run reads under
-# Rows bound to a GitHub repository are no longer accepted; an old one can be deleted:
+# A row bound to a GitHub repository can only be deleted:
 outlayer secrets delete --repo github.com/user/repo --branch main
 
 # Lock a project's row to one build: only a run of these exact bytes reads it, a rebuild is refused.
@@ -149,7 +148,7 @@ outlayer secrets set '{"KEY":"val"}' --access whitelist:alice.near,bob.near
 outlayer secrets set '{"KEY":"val"}' --access whitelist:me.near,agent@2026-10-01T00:00:00Z   # a grant that lapses
 outlayer secrets access --project me.near/app --profile default --access whitelist:me.near    # change who may read; the value stays
 # Without --access: a row that exists keeps its condition; a new project row admits only you;
-# a new repository- or hash-bound row admits everyone.
+# a new hash-bound row admits everyone.
 
 # Update (merge with existing, preserves all PROTECTED_* variables)
 outlayer secrets update '{"NEW_KEY":"val"}' --project alice.near/my-agent
