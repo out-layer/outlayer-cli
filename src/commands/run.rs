@@ -181,9 +181,11 @@ async fn run_on_chain(
         "max_execution_seconds": 10
     });
 
+    let input_data = serde_json::to_string(&input_value)?;
+
     // Estimate cost
     let cost_str: String = near
-        .estimate_execution_cost(Some(resource_limits.clone()))
+        .estimate_execution_cost(Some(resource_limits.clone()), input_data.len())
         .await?;
     let cost_yocto: u128 = cost_str
         .trim_matches('"')
@@ -195,7 +197,6 @@ async fn run_on_chain(
     eprintln!("Running {label} (on-chain, ~{cost_near:.4} NEAR)...");
 
     let source_json = source.to_contract_json(build_target).await?;
-    let input_data = serde_json::to_string(&input_value)?;
     let gas = 300_000_000_000_000u64; // 300 TGas
 
     let secrets_ref_json = secrets_ref
