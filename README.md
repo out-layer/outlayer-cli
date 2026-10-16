@@ -1,6 +1,6 @@
 # OutLayer CLI
 
-Command-line tool for deploying, running, and managing [OutLayer](https://outlayer.fastnear.com) agents.
+Command-line tool for deploying, running, and managing [OutLayer](https://outlayer.ai) agents.
 
 ```bash
 outlayer login                                              # Import NEAR full access key

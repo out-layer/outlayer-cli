@@ -125,7 +125,7 @@ impl NetworkConfig {
             rpc_url: rpc_url_for("https://rpc.mainnet.near.org"),
             contract_id: "outlayer.near".to_string(),
             wallet_url: "https://app.mynearwallet.com".to_string(),
-            api_base_url: "https://api.outlayer.fastnear.com".to_string(),
+            api_base_url: "https://api.outlayer.ai".to_string(),
             // Production deploy uses `dao.outlayer.near` per docker
             // .env.mainnet-keystore-phala. The keystore worker's
             // KEYSTORE_DAO_CONTRACT is the canonical source.
@@ -140,7 +140,7 @@ impl NetworkConfig {
             rpc_url: rpc_url_for("https://test.rpc.fastnear.com"),
             contract_id: "outlayer.testnet".to_string(),
             wallet_url: "https://testnet.mynearwallet.com".to_string(),
-            api_base_url: "https://testnet-api.outlayer.fastnear.com".to_string(),
+            api_base_url: "https://testnet-api.outlayer.ai".to_string(),
             keystore_dao_id: "dao.outlayer.testnet".to_string(),
             mpc_contract_id: "v1.signer-prod.testnet".to_string(),
         }
