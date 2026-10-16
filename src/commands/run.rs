@@ -13,10 +13,6 @@ pub enum RunSource {
         project_id: String,
         version: Option<String>,
     },
-    GitHub {
-        repo: String,
-        commit: Option<String>,
-    },
     WasmUrl {
         url: String,
         hash: Option<String>,
@@ -33,16 +29,6 @@ impl RunSource {
                     "version_key": version
                 }
             })),
-            RunSource::GitHub { repo, commit } => {
-                let commit = commit.as_deref().unwrap_or("main");
-                Ok(json!({
-                    "GitHub": {
-                        "repo": repo,
-                        "commit": commit,
-                        "build_target": build_target
-                    }
-                }))
-            }
             RunSource::WasmUrl { url, hash } => {
                 let hash = match hash.as_deref() {
                     Some(h) => h.to_string(),
@@ -65,7 +51,6 @@ impl RunSource {
     fn label(&self) -> String {
         match self {
             RunSource::Project { project_id, .. } => project_id.clone(),
-            RunSource::GitHub { repo, .. } => format!("github:{repo}"),
             RunSource::WasmUrl { url, .. } => format!("wasm:{url}"),
         }
     }
@@ -73,7 +58,7 @@ impl RunSource {
 
 // ── Run ──────────────────────────────────────────────────────────────
 
-/// `outlayer run` — execute agent from project, github, or wasm url
+/// `outlayer run` — execute agent from a project or a wasm url
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     network: &NetworkConfig,

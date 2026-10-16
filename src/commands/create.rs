@@ -97,7 +97,7 @@ pub async fn create(
         },
         build: Some(BuildSection {
             target: "wasm32-wasip2".to_string(),
-            source: "github".to_string(),
+            source: "wasm_url".to_string(),
         }),
         deploy: Some(DeploySection {
             repo: None,
@@ -119,10 +119,10 @@ pub async fn create(
 
     eprintln!("\nYour agent is ready. Next steps:");
     eprintln!("  cd {name}");
-    eprintln!("  git init && git remote add origin <your-repo-url>");
     eprintln!("  # edit src/main.rs");
-    eprintln!("  git push");
-    eprintln!("  outlayer deploy {name}");
+    eprintln!("  ./build.sh");
+    eprintln!("  outlayer upload out/{name}.wasm");
+    eprintln!("  outlayer deploy {name} <the FastFS URL printed by upload>");
     eprintln!(
         "  outlayer run {}/{name} '{{\"command\": \"hello\"}}'",
         creds.account_id

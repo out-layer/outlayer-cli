@@ -45,10 +45,10 @@ outlayer create my-agent                    # basic template (stdin/stdout)
 outlayer create my-agent --template contract # with OutLayer SDK (VRF, storage, RPC)
 cd my-agent
 
-# 3. Edit src/main.rs, push to GitHub, then deploy
-git init && git remote add origin <your-repo-url>
-git push
-outlayer deploy my-agent
+# 3. Edit src/main.rs, build, upload the .wasm and deploy it
+./build.sh
+outlayer upload out/my-agent.wasm
+outlayer deploy my-agent <FastFS URL printed by upload>
 
 # 4. Create a payment key for HTTPS calls
 outlayer keys create
@@ -75,13 +75,17 @@ outlayer run alice.near/my-agent '{"command": "hello"}'
 | `outlayer create <name>` | Create project from template (basic) in `./<name>/` |
 | `outlayer create <name> --template contract` | Create with OutLayer SDK (VRF, storage, RPC) |
 | `outlayer create <name> --dir /path` | Create in a custom directory |
-| `outlayer deploy <name> <wasm-url>` | Deploy from WASM URL (FastFS, etc.) |
-| `outlayer deploy <name>` | Deploy from current git repo (origin + HEAD) |
-| `outlayer deploy <name> --github` | Explicitly deploy from git (same as no URL) |
+| `outlayer deploy <name> <wasm-url>` | Deploy a published .wasm (FastFS URL from `outlayer upload`, or any URL) |
 | `outlayer deploy <name> --no-activate` | Deploy without activating |
 | `outlayer run <project> [input]` | Execute agent (HTTPS or on-chain fallback) |
 | `outlayer projects [account]` | List projects for a user |
 | `outlayer status [call_id]` | Project info or poll async call |
+
+A version is a published `.wasm`, named by its sha256: what a caller runs and pays for is
+exactly the file you deployed, and it cannot change under that version afterwards. OutLayer
+does not build from git repositories. To build the way the platform used to — the same pinned
+Docker image, reproducible — use `scripts/build_github_wasm.sh` from the
+[OutLayer repository](https://github.com/out-layer/outlayer).
 
 ```bash
 # Run from project (uses payment key if available, else on-chain NEAR)
@@ -93,10 +97,6 @@ outlayer run alice.near/my-agent '{}' --compute-limit 1000000000          # cust
 
 # Attach secrets to execution (secrets must be stored via `outlayer secrets set`)
 outlayer run alice.near/my-agent '{}' --secrets-profile default --secrets-account alice.near
-
-# Run from GitHub repo (on-chain)
-outlayer run --github github.com/user/repo '{"command": "hello"}'
-outlayer run --github github.com/user/repo --commit abc123 '{"input": 1}'
 
 # Run from WASM URL (on-chain) — FastFS, any HTTP URL
 outlayer run --wasm https://alice.near.fastfs.io/outlayer.near/abc.wasm '{"cmd": "hi"}'
@@ -123,8 +123,9 @@ outlayer projects bob.near
 # Set secrets (JSON object, overwrites existing)
 outlayer secrets set '{"API_KEY":"sk-...","DB_URL":"postgres://..."}'
 outlayer secrets set '{"API_KEY":"sk-..."}' --project alice.near/my-agent
-outlayer secrets set '{"API_KEY":"sk-..."}' --repo github.com/user/repo --branch main
 outlayer secrets set '{"API_KEY":"sk-..."}' --wasm-hash abc123...   # the row a raw WASM URL run reads under
+# Rows bound to a GitHub repository are no longer accepted; an old one can be deleted:
+outlayer secrets delete --repo github.com/user/repo --branch main
 
 # Lock a project's row to one build: only a run of these exact bytes reads it, a rebuild is refused.
 # The hash is "Executed binary" in an execution's details. Move it to the next release with `access`.
@@ -340,7 +341,7 @@ owner = "alice.near"
 
 [build]
 target = "wasm32-wasip2"
-source = "github"
+source = "wasm_url"
 
 [run]
 payment_key_nonce = 1

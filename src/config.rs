@@ -58,7 +58,7 @@ fn default_target() -> String {
     "wasm32-wasip2".to_string()
 }
 fn default_source() -> String {
-    "github".to_string()
+    "wasm_url".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]

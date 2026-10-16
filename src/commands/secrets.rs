@@ -107,6 +107,23 @@ async fn canonicalize_repo(
     Ok(())
 }
 
+/// A row bound to a repository is read only by a run built from that
+/// repository, and OutLayer no longer builds from repositories: it runs a
+/// published wasm, named by its hash, that cannot change under the same
+/// version. So no new value or condition goes into such a row; an existing
+/// one can still be listed and deleted.
+fn refuse_repo_row(repo: &Option<String>) -> Result<()> {
+    if repo.is_some() {
+        anyhow::bail!(
+            "Secrets bound to a GitHub repository are no longer accepted: OutLayer runs only \
+             published .wasm builds. Bind the secret to the project (--project <owner>/<name>) \
+             or to a build (--wasm-hash <sha256>). An existing repository row can still be \
+             listed (`outlayer secrets list`) and deleted (`outlayer secrets delete --repo …`)."
+        );
+    }
+    Ok(())
+}
+
 fn resolve_accessor(
     project: Option<String>,
     repo: Option<String>,
@@ -768,6 +785,7 @@ pub async fn set(
     via: Option<&str>,
     drop_callers: bool,
 ) -> Result<()> {
+    refuse_repo_row(&repo)?;
     let creds = config::load_credentials(network)?;
     if (direct || via.is_some()) && drop_callers {
         anyhow::bail!("--direct/--via and --drop-callers ask for opposite things; pass one");
@@ -1025,6 +1043,7 @@ pub async fn update(
     wasm_hash: Option<String>,
     generate: Vec<String>,
 ) -> Result<()> {
+    refuse_repo_row(&repo)?;
     let creds = config::load_credentials(network)?;
 
     let mut accessor = resolve_accessor(project, repo, branch, wasm_hash, project_config)?;
@@ -1220,6 +1239,7 @@ pub async fn access(
     via: Option<&str>,
     drop_callers: bool,
 ) -> Result<()> {
+    refuse_repo_row(&repo)?;
     let creds = config::load_credentials(network)?;
     if access_str.is_none() && build.is_none() && !drop_build && !direct && via.is_none() && !drop_callers {
         anyhow::bail!(
@@ -2000,6 +2020,13 @@ fn format_deadline(until_ns: &Value) -> String {
 mod tests {
     use super::*;
     use crate::api::{AgentSecretPubkey, PreparedAgentSecret, PreparedAgentSecretDelete};
+
+    #[test]
+    fn a_new_value_bound_to_a_repository_is_refused() {
+        assert!(refuse_repo_row(&None).is_ok());
+        let err = refuse_repo_row(&Some("github.com/a/b".to_string())).unwrap_err().to_string();
+        assert!(err.contains("no longer accepted") && err.contains("--project"), "{err}");
+    }
 
     const PROJECT: &str = "connectors.outlayer.testnet/connector-probe";
     const AGENT: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";

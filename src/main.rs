@@ -52,16 +52,12 @@ enum Commands {
         /// Project name (e.g. my-agent)
         name: String,
 
-        /// WASM URL to deploy (e.g. FastFS URL). If omitted, deploys from current git repo
-        wasm_url: Option<String>,
+        /// WASM URL to deploy (e.g. the FastFS URL `outlayer upload` prints)
+        wasm_url: String,
 
         /// WASM SHA256 hash (auto-computed from URL if omitted)
         #[arg(long)]
         hash: Option<String>,
-
-        /// Deploy from current git repo (origin remote + HEAD commit)
-        #[arg(long)]
-        github: bool,
 
         /// Build target (default: wasm32-wasip2)
         #[arg(long, default_value = "wasm32-wasip2")]
@@ -74,19 +70,11 @@ enum Commands {
     /// Execute agent
     Run {
         /// Project to run (owner/name, e.g. alice.near/my-agent)
-        #[arg(required_unless_present_any = ["github", "wasm"])]
+        #[arg(required_unless_present = "wasm")]
         project: Option<String>,
 
         /// JSON input
         input: Option<String>,
-
-        /// Run from GitHub repo (url or owner/repo)
-        #[arg(long)]
-        github: Option<String>,
-
-        /// Git commit (for --github, defaults to latest)
-        #[arg(long)]
-        commit: Option<String>,
 
         /// Run from WASM URL
         #[arg(long)]
@@ -271,16 +259,16 @@ enum SecretsCommands {
         #[arg(long)]
         project: Option<String>,
 
-        /// Repository accessor (e.g. github.com/user/repo)
-        #[arg(long)]
+        /// Repository accessor: refused for new values (OutLayer runs only published .wasm builds)
+        #[arg(long, hide = true)]
         repo: Option<String>,
 
         /// Branch (use with --repo)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         branch: Option<String>,
 
         /// WASM hash accessor: the row a raw WASM URL run reads under. To
-        /// lock a project or repository row to one build, use --build.
+        /// lock a project row to one build, use --build.
         #[arg(long)]
         wasm_hash: Option<String>,
 
@@ -290,7 +278,7 @@ enum SecretsCommands {
 
         /// Who may read: allow-all, or whitelist:acc1,acc2 — an entry may carry a
         /// deadline, acc@2026-10-01T00:00:00Z. Omitted: a row that exists keeps
-        /// its condition; a new project row admits only you; a new repo/hash row
+        /// its condition; a new project row admits only you; a new hash row
         /// admits everyone.
         #[arg(long)]
         access: Option<String>,
@@ -396,12 +384,12 @@ enum SecretsCommands {
         #[arg(long)]
         project: Option<String>,
 
-        /// Repository accessor
-        #[arg(long)]
+        /// Repository accessor: refused for new values (OutLayer runs only published .wasm builds)
+        #[arg(long, hide = true)]
         repo: Option<String>,
 
         /// Branch (use with --repo)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         branch: Option<String>,
 
         /// WASM hash accessor
@@ -424,12 +412,12 @@ enum SecretsCommands {
         #[arg(long)]
         project: Option<String>,
 
-        /// Repository accessor
-        #[arg(long)]
+        /// Repository accessor: refused for new values (OutLayer runs only published .wasm builds)
+        #[arg(long, hide = true)]
         repo: Option<String>,
 
         /// Branch (use with --repo)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         branch: Option<String>,
 
         /// WASM hash accessor
@@ -708,21 +696,16 @@ async fn main() -> anyhow::Result<()> {
             name,
             wasm_url,
             hash,
-            github,
             target,
             no_activate,
         } => {
             let network = resolve_with_project(env_net)?;
-            // --github forces GitHub mode (ignores wasm_url)
-            let wasm_url = if github { None } else { wasm_url };
-            commands::deploy::deploy(&network, &name, wasm_url, hash, &target, no_activate)
+            commands::deploy::deploy(&network, &name, &wasm_url, hash, &target, no_activate)
                 .await?;
         }
         Commands::Run {
             project,
             input,
-            github,
-            commit,
             wasm,
             hash,
             input_file,
@@ -735,9 +718,7 @@ async fn main() -> anyhow::Result<()> {
             secrets_account,
         } => {
             let network = resolve_with_project(env_net)?;
-            let source = if let Some(repo) = github {
-                commands::run::RunSource::GitHub { repo, commit }
-            } else if let Some(url) = wasm {
+            let source = if let Some(url) = wasm {
                 commands::run::RunSource::WasmUrl { url, hash }
             } else {
                 commands::run::RunSource::Project {

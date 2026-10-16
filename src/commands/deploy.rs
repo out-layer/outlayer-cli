@@ -5,11 +5,15 @@ use sha2::{Digest, Sha256};
 use crate::config::{self, NetworkConfig};
 use crate::near::{ContractCaller, NearClient};
 
-/// `outlayer deploy <name>` — deploy agent to OutLayer
+/// `outlayer deploy <name> <wasm_url>` — deploy agent to OutLayer
+///
+/// A version is a prebuilt wasm named by its sha256: what a caller pays to run
+/// is exactly the file that was published, and it cannot change under the same
+/// version later.
 pub async fn deploy(
     network: &NetworkConfig,
     project_name: &str,
-    wasm_url: Option<String>,
+    wasm_url: &str,
     wasm_hash: Option<String>,
     build_target: &str,
     no_activate: bool,
@@ -17,44 +21,25 @@ pub async fn deploy(
     let creds = config::load_credentials(network)?;
     let owner = &creds.account_id;
 
-    let (source, version_label) = if let Some(url) = &wasm_url {
-        // WASM URL source (FastFS or any URL)
-        let hash = match &wasm_hash {
-            Some(h) => h.clone(),
-            None => {
-                eprintln!("Downloading WASM to compute hash...");
-                compute_wasm_hash(url).await?
-            }
-        };
-        let source = json!({
-            "WasmUrl": {
-                "url": url,
-                "hash": hash,
-                "build_target": build_target
-            }
-        });
-        let short_hash = if hash.len() > 12 { &hash[..12] } else { &hash };
-        (source, format!("{short_hash}..."))
-    } else {
-        // GitHub source (default)
-        let commit = get_git_commit()?;
-        let repo_url = get_git_remote()?;
-        let source = json!({
-            "GitHub": {
-                "repo": repo_url,
-                "commit": commit,
-                "build_target": build_target
-            }
-        });
-        (source, commit)
+    let hash = match wasm_hash {
+        Some(h) => h,
+        None => {
+            eprintln!("Downloading WASM to compute hash...");
+            compute_wasm_hash(wasm_url).await?
+        }
     };
+    let source = json!({
+        "WasmUrl": {
+            "url": wasm_url,
+            "hash": hash,
+            "build_target": build_target
+        }
+    });
+    let short_hash = if hash.len() > 12 { &hash[..12] } else { &hash };
+    let version_label = format!("{short_hash}...");
 
     eprintln!("Deploying {owner}/{project_name}...");
-    if wasm_url.is_some() {
-        eprintln!("  Source: WasmUrl ({})", wasm_url.as_ref().unwrap());
-    } else {
-        eprintln!("  Source: GitHub ({version_label})");
-    }
+    eprintln!("  Source: WasmUrl ({wasm_url})");
 
     let near = NearClient::new(network);
     let caller = ContractCaller::from_credentials(&creds, network)?;
@@ -122,30 +107,4 @@ async fn compute_wasm_hash(url: &str) -> Result<String> {
         .context("Failed to read WASM response body")?;
 
     Ok(hex::encode(Sha256::digest(&bytes)))
-}
-
-fn get_git_commit() -> Result<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .context("Failed to run git rev-parse HEAD")?;
-
-    if !output.status.success() {
-        anyhow::bail!("Not a git repository. Initialize git first: git init && git commit");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn get_git_remote() -> Result<String> {
-    let output = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .context("Failed to get git remote URL")?;
-
-    if !output.status.success() {
-        anyhow::bail!("No git remote found. Add one: git remote add origin <url>");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
