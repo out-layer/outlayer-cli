@@ -100,15 +100,15 @@ impl TestContext {
             "max_execution_seconds": 10
         });
 
+        let input_data = serde_json::to_string(&input).unwrap();
         let cost_str = self
             .near
-            .estimate_execution_cost(Some(resource_limits.clone()))
+            .estimate_execution_cost(Some(resource_limits.clone()), input_data.len())
             .await
             .expect("estimate_execution_cost failed");
         let cost_yocto: u128 = cost_str.trim_matches('"').parse().expect("bad cost");
         eprintln!("  cost: {:.4} NEAR", cost_yocto as f64 / 1e24);
 
-        let input_data = serde_json::to_string(&input).unwrap();
         let secrets_ref_json = secrets_ref
             .map(|sr| json!({"profile": sr.profile, "account_id": sr.account_id}))
             .unwrap_or(Value::Null);
