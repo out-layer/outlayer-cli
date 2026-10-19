@@ -142,24 +142,68 @@ async fn run_https(
             eprintln!("Poll:    {poll_url}");
         }
     } else {
-        if let Some(output) = &response.output {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
-            );
-        }
-        if let Some(error) = &response.error {
-            eprintln!("Error: {error}");
-        }
-        if let Some(cost) = &response.compute_cost {
-            eprintln!("Cost: {cost}");
-        }
-        if let Some(time_ms) = response.time_ms {
-            eprintln!("Time: {time_ms}ms");
-        }
+        print_sync_result(&response)?;
     }
 
     Ok(())
+}
+
+/// A synchronous call's answer. `pending` here means the API restarted while the call ran: it was
+/// not resent and is still running (a resend would run and charge it twice), so this fails with
+/// where its result is instead of printing nothing.
+fn print_sync_result(response: &crate::api::HttpsCallResponse) -> Result<()> {
+    if response.status == "pending" {
+        anyhow::bail!(
+            "The OutLayer API restarted while this call ran. The call is still running and was not resent \
+             (do not run it again, it would be charged twice).\nGet its result with: outlayer status {}",
+            response.call_id
+        );
+    }
+    if let Some(output) = &response.output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
+        );
+    }
+    if let Some(error) = &response.error {
+        eprintln!("Error: {error}");
+    }
+    if let Some(cost) = &response.compute_cost {
+        eprintln!("Cost: {cost}");
+    }
+    if let Some(time_ms) = response.time_ms {
+        eprintln!("Time: {time_ms}ms");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod sync_result_tests {
+    use super::print_sync_result;
+    use crate::api::HttpsCallResponse;
+
+    fn response(status: &str) -> HttpsCallResponse {
+        serde_json::from_value(serde_json::json!({
+            "call_id": "6f1c0e2a-1111-2222-3333-444455556666",
+            "status": status,
+            "output": if status == "completed" { serde_json::json!({"ok": true}) } else { serde_json::Value::Null },
+            "poll_url": if status == "pending" { serde_json::json!("/calls/6f1c0e2a-1111-2222-3333-444455556666") } else { serde_json::Value::Null },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pending_sync_answer_fails_and_names_the_call() {
+        let err = print_sync_result(&response("pending")).unwrap_err().to_string();
+        assert!(err.contains("restarted"), "{err}");
+        assert!(err.contains("outlayer status 6f1c0e2a-1111-2222-3333-444455556666"), "{err}");
+    }
+
+    #[test]
+    fn a_finished_sync_answer_succeeds() {
+        assert!(print_sync_result(&response("completed")).is_ok());
+        assert!(print_sync_result(&response("failed")).is_ok());
+    }
 }
 
 /// Execute on-chain via request_execution (any source type)
