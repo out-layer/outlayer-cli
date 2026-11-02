@@ -208,7 +208,13 @@ enum Commands {
 #[derive(Subcommand)]
 enum KeysCommands {
     /// Create a new payment key
-    Create,
+    Create {
+        /// Let the key pay only for this project: `owner/name`, or `owner/*`
+        /// for every project of one owner. Repeat for several. Without it the
+        /// key pays for any project.
+        #[arg(long = "project", value_name = "OWNER/NAME")]
+        projects: Vec<String>,
+    },
     /// List payment keys with balances
     List,
     /// Check payment key balance
@@ -742,7 +748,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Keys { command } => {
             let network = resolve_with_project(env_net)?;
             match command {
-                KeysCommands::Create => commands::keys::create(&network).await?,
+                KeysCommands::Create { projects } => commands::keys::create(&network, &projects).await?,
                 KeysCommands::List => commands::keys::list(&network).await?,
                 KeysCommands::Balance { nonce } => {
                     commands::keys::balance(&network, nonce).await?

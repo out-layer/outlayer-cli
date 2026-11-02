@@ -6,8 +6,12 @@ use crate::config::{self, NetworkConfig};
 use crate::crypto;
 use crate::near::{ContractCaller, NearClient};
 
-/// `outlayer keys create` — create a new payment key
-pub async fn create(network: &NetworkConfig) -> Result<()> {
+/// `outlayer keys create [--project owner/name]…` — create a new payment key,
+/// optionally restricted to the projects named.
+pub async fn create(network: &NetworkConfig, projects: &[String]) -> Result<()> {
+    for project in projects {
+        check_project_scope(project)?;
+    }
     let creds = config::load_credentials(network)?;
 
     let near = NearClient::new(network);
@@ -39,7 +43,7 @@ pub async fn create(network: &NetworkConfig) -> Result<()> {
     // `max_per_call` of "0" means no limit, which is what an unset limit is.
     let secrets_json = json!({
         "key": secret,
-        "project_ids": [],
+        "project_ids": projects,
         "max_per_call": "0",
         "initial_balance": "0"
     })
@@ -103,6 +107,11 @@ pub async fn create(network: &NetworkConfig) -> Result<()> {
         .context("Failed to store payment key")?;
 
     eprintln!("Payment key created (nonce: {nonce})");
+    if projects.is_empty() {
+        eprintln!("It pays for any project.");
+    } else {
+        eprintln!("It pays only for: {}", projects.join(", "));
+    }
     println!("{api_key}");
     eprintln!(
         "\nSaved to {} (owner-only). Read it back with: outlayer keys show {nonce}",
@@ -344,4 +353,34 @@ fn format_usd(minimal_units: &str) -> String {
     let units: u64 = minimal_units.parse().unwrap_or(0);
     let dollars = units as f64 / 1_000_000.0;
     format!("${:.2}", dollars)
+}
+
+/// A scope the coordinator matches: `owner/name` exactly, or `owner/*` for
+/// every project of one owner. Anything else would be stored and then match
+/// nothing, leaving a key that pays for no project at all.
+fn check_project_scope(project: &str) -> Result<()> {
+    let (owner, name) = project
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("--project {project:?}: expected owner/name, for example alice.near/my-app"))?;
+    if owner.is_empty() || name.is_empty() || name.contains('/') || owner.contains(char::is_whitespace) || name.contains(char::is_whitespace) {
+        anyhow::bail!("--project {project:?}: expected owner/name, or owner/* for every project of one owner");
+    }
+    if name.contains('*') && name != "*" {
+        anyhow::bail!("--project {project:?}: `*` stands for a whole project name only (owner/*), not a prefix");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod project_scope_tests {
+    use super::check_project_scope;
+
+    #[test]
+    fn a_scope_is_owner_slash_name_or_owner_slash_star() {
+        assert!(check_project_scope("zavodil2.testnet/compliance-gateway").is_ok());
+        assert!(check_project_scope("alice.near/*").is_ok());
+        for bad in ["compliance-gateway", "/app", "alice.near/", "a/b/c", "alice.near/app*", "alice near/app"] {
+            assert!(check_project_scope(bad).is_err(), "{bad} must be refused");
+        }
+    }
 }

@@ -199,7 +199,7 @@ Payment keys are required for HTTPS API calls. Created separately (requires USDC
 
 | Command | Description |
 |---------|-------------|
-| `outlayer keys create` | Create a new payment key |
+| `outlayer keys create [--project owner/name]…` | Create a new payment key; `--project` (repeatable, `owner/*` for all of one owner's projects) lets it pay only for those projects |
 | `outlayer keys list` | List keys with balances |
 | `outlayer keys balance <nonce>` | Check key balance |
 | `outlayer keys topup <nonce> <amount>` | Top up with NEAR (mainnet, swaps to USDC) |
