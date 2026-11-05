@@ -750,13 +750,21 @@ fn parse_generate_specs(generate: Vec<String>) -> Result<Vec<GenerateSpec>> {
 
 // ── Parse JSON secrets ───────────────────────────────────────────────
 
-fn parse_secrets_json(json_str: &str) -> Result<serde_json::Map<String, Value>> {
+/// A row's variables as `set` stores them. `{}` is a row: it holds nothing, and
+/// its access condition still says who may name it — an officer's consent to
+/// be asked, or a row replaced by an empty one.
+fn parse_secrets_object(json_str: &str) -> Result<serde_json::Map<String, Value>> {
     let val: Value =
         serde_json::from_str(json_str).context("Invalid JSON. Use: '{\"KEY\":\"value\"}'")?;
-    let map = val
+    Ok(val
         .as_object()
         .context("Secrets must be a JSON object: '{\"KEY\":\"value\"}'")?
-        .clone();
+        .clone())
+}
+
+/// Variables to change in a row that exists: changing none is a mistake.
+fn parse_secrets_json(json_str: &str) -> Result<serde_json::Map<String, Value>> {
+    let map = parse_secrets_object(json_str)?;
     if map.is_empty() {
         anyhow::bail!("Empty secrets object");
     }
@@ -796,7 +804,7 @@ pub async fn set(
     let generate_specs = parse_generate_specs(generate)?;
 
     let secrets_map = match &secrets_json {
-        Some(s) => Some(parse_secrets_json(s)?),
+        Some(s) => Some(parse_secrets_object(s)?),
         None => None,
     };
 
@@ -2020,6 +2028,14 @@ fn format_deadline(until_ns: &Value) -> String {
 mod tests {
     use super::*;
     use crate::api::{AgentSecretPubkey, PreparedAgentSecret, PreparedAgentSecretDelete};
+
+    #[test]
+    fn a_row_may_hold_nothing_and_a_change_may_not() {
+        assert!(parse_secrets_object("{}").unwrap().is_empty());
+        assert!(parse_secrets_json("{}").unwrap_err().to_string().contains("Empty secrets object"));
+        assert_eq!(parse_secrets_object(r#"{"A":"1"}"#).unwrap().len(), 1);
+        assert!(parse_secrets_object("[]").is_err());
+    }
 
     #[test]
     fn a_new_value_bound_to_a_repository_is_refused() {
