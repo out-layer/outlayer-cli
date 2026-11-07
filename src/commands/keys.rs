@@ -242,11 +242,10 @@ async fn stablecoin_contract(near: &NearClient) -> Result<String> {
 
 /// `outlayer keys topup N --usd X` — top up with the stablecoin.
 ///
-/// The second half of creating a usable key, and the only half that works off
-/// mainnet: the NEAR route swaps through Intents, which exists on mainnet
-/// alone. The transfer carries `top_up_payment_key` in its `msg`, the contract
-/// credits the key, and the worker re-encrypts the blob with the new balance —
-/// so the balance appears a moment later, not instantly.
+/// The second half of creating a usable key. The transfer carries
+/// `top_up_payment_key` in its `msg`, the contract credits the key, and the
+/// worker re-encrypts the blob with the new balance — so the balance appears a
+/// moment later, not instantly.
 pub async fn topup_usd(network: &NetworkConfig, nonce: u32, amount_usd: f64) -> Result<()> {
     let creds = config::load_credentials(network)?;
 
@@ -279,48 +278,6 @@ pub async fn topup_usd(network: &NetworkConfig, nonce: u32, amount_usd: f64) -> 
         .context("Top-up failed")?;
 
     eprintln!("Top-up sent. The balance appears once the worker has re-encrypted the key.");
-    eprintln!("Check balance: outlayer keys balance {nonce}");
-
-    Ok(())
-}
-
-/// `outlayer keys topup N X` — top up with NEAR
-pub async fn topup(network: &NetworkConfig, nonce: u32, amount_near: f64) -> Result<()> {
-    let creds = config::load_credentials(network)?;
-
-    if network.network_id != "mainnet" {
-        anyhow::bail!(
-            "Top-up with NEAR is only available on mainnet — it swaps through Intents, \
-             which has no testnet deployment. Use --usd to send the stablecoin directly."
-        );
-    }
-
-    // Convert NEAR to yoctoNEAR
-    let deposit = (amount_near * 1e24) as u128;
-    let min_deposit = 35_000_000_000_000_000_000_000u128; // 0.035 NEAR minimum
-    if deposit < min_deposit {
-        anyhow::bail!("Minimum top-up is 0.035 NEAR (0.01 deposit + 0.025 execution fees).");
-    }
-
-    let caller = ContractCaller::from_credentials(&creds, network)?;
-    let gas = 200_000_000_000_000u64; // 200 TGas (cross-contract calls)
-
-    eprintln!("Topping up key nonce {nonce} with {amount_near} NEAR...");
-
-    caller
-        .call_contract(
-            "top_up_payment_key_with_near",
-            json!({
-                "nonce": nonce,
-                "swap_contract_id": "intents.near"
-            }),
-            gas,
-            deposit,
-        )
-        .await
-        .context("Top-up failed")?;
-
-    eprintln!("Top-up successful. NEAR will be swapped to USDC via Intents.");
     eprintln!("Check balance: outlayer keys balance {nonce}");
 
     Ok(())

@@ -202,7 +202,7 @@ Payment keys are required for HTTPS API calls. Created separately (requires USDC
 | `outlayer keys create [--project owner/name]…` | Create a new payment key; `--project` (repeatable, `owner/*` for all of one owner's projects) lets it pay only for those projects |
 | `outlayer keys list` | List keys with balances |
 | `outlayer keys balance <nonce>` | Check key balance |
-| `outlayer keys topup <nonce> <amount>` | Top up with NEAR (mainnet, swaps to USDC) |
+| `outlayer keys topup <nonce> --usd <amount>` | Top up with the stablecoin (any network). A top-up with NEAR is on the website |
 | `outlayer keys delete <nonce>` | Delete key (refunds storage) |
 | `outlayer keys trial-key [--api-key wk_...]` | Print a custody wallet's nonce-0 key (trial or sponsored); it is derived, so it is read again rather than stored |
 

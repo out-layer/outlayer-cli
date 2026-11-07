@@ -227,11 +227,12 @@ enum KeysCommands {
         /// Payment key nonce
         nonce: u32,
     },
-    /// Top up payment key with NEAR
+    /// Top up payment key with the stablecoin
     Topup {
         /// Payment key nonce
         nonce: u32,
-        /// Amount in NEAR — mainnet only, it swaps through Intents
+        /// Accepted only to refuse it: a top-up with NEAR is done on the website
+        #[arg(hide = true)]
         amount: Option<f64>,
         /// Amount in USD, sent as the stablecoin itself. Works on any network.
         #[arg(long)]
@@ -756,10 +757,13 @@ async fn main() -> anyhow::Result<()> {
                 KeysCommands::Show { nonce } => commands::keys::show(&network, nonce)?,
                 KeysCommands::Topup { nonce, amount, usd } => match (usd, amount) {
                     (Some(usd), _) => commands::keys::topup_usd(&network, nonce, usd).await?,
-                    (None, Some(near)) => commands::keys::topup(&network, nonce, near).await?,
+                    (None, Some(_)) => anyhow::bail!(
+                        "The CLI does not top up with NEAR. Do it on the website \
+                         (https://app.outlayer.ai/payment-keys), or send the stablecoin: \
+                         `outlayer keys topup {nonce} --usd 1`."
+                    ),
                     (None, None) => anyhow::bail!(
-                        "Say how much: `--usd 1` sends the stablecoin (any network), or a \
-                         positional NEAR amount swaps through Intents (mainnet only)."
+                        "Say how much: `outlayer keys topup {nonce} --usd 1` sends the stablecoin."
                     ),
                 },
                 KeysCommands::Delete { nonce } => {
