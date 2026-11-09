@@ -302,7 +302,182 @@ pub async fn delete(network: &NetworkConfig, nonce: u32) -> Result<()> {
         .await
         .context("Failed to delete payment key")?;
 
-    eprintln!("Payment key deleted. Storage deposit refunded.");
+    eprintln!("Payment key deleted. Storage deposit refunded; the remaining balance is forfeited (`outlayer keys close` would have refunded it).");
+    Ok(())
+}
+
+/// The chain's ledger of one key's refund, as `get_payment_key_refund_ledger`
+/// answers it. `None` for a key created before the ledger that was never
+/// topped up or closed since.
+#[derive(Debug, serde::Deserialize)]
+struct RefundLedgerView {
+    user_funded: String,
+    refunded: String,
+    refundable_cap: String,
+    closing_since: Option<u64>,
+    claimable_at: Option<u64>,
+}
+
+async fn refund_ledger(near: &NearClient, owner: &str, nonce: u32) -> Result<Option<RefundLedgerView>> {
+    near.view_call(
+        "get_payment_key_refund_ledger",
+        json!({ "owner": owner, "nonce": nonce }),
+    )
+    .await
+    .context("Failed to read the key's refund ledger from the contract")
+}
+
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// "in 23h 59m" / "now", for a block timestamp in nanoseconds.
+fn until(ns: u64) -> String {
+    let now = now_ns();
+    if ns <= now {
+        return "now".to_string();
+    }
+    let secs = (ns - now) / 1_000_000_000;
+    format!("in {}h {:02}m", secs / 3600, (secs % 3600) / 60)
+}
+
+/// `outlayer keys close N` — stop a key and start its refund.
+///
+/// The key takes no more calls or top-ups from here; what it has left is
+/// claimed a day later with `keys claim`, once every call in flight on it has
+/// settled. The chain pays at most what THIS account deposited on the key
+/// after the refund ledger was released, less what it already refunded — the
+/// figure printed before the transaction is sent.
+pub async fn close(network: &NetworkConfig, nonce: u32) -> Result<()> {
+    let creds = config::load_credentials(network)?;
+    let near = NearClient::new(network);
+    let caller = ContractCaller::from_credentials(&creds, network)?;
+
+    let ledger = refund_ledger(&near, &creds.account_id, nonce).await?;
+    if let Some(l) = &ledger {
+        if let (Some(_), Some(at)) = (l.closing_since, l.claimable_at) {
+            anyhow::bail!(
+                "Payment key {nonce} is already closing. Claim its refund with \
+                 `outlayer keys claim {nonce}` ({}).",
+                until(at)
+            );
+        }
+    }
+    let cap = ledger.as_ref().map(|l| l.refundable_cap.as_str()).unwrap_or("0");
+
+    eprintln!("Closing payment key {nonce}.");
+    eprintln!("  From now: no new calls, no top-ups. Calls already running settle normally.");
+    if cap == "0" {
+        eprintln!("  Nothing on this key is refundable on chain: it was funded before refunds existed, or");
+        eprintln!("  by a grant. Closing it deletes it; whatever it can still spend is spent through the key.");
+    } else {
+        eprintln!("  Refundable on chain: {} — what this account deposited on the key since refunds exist, less refunds.", format_usd(cap));
+    }
+    eprintln!("  Grants, sponsor credit and trial allowance are never refunded.");
+    eprintln!("  Do not close while a NEAR top-up of this key is in progress: the swapped stablecoin");
+    eprintln!("  would go back to the swap account, not to you.");
+    eprintln!("  In 24 hours: `outlayer keys claim {nonce}` pays it out and deletes the key (one claim a day).");
+
+    caller
+        .call_contract(
+            "close_payment_key",
+            json!({ "nonce": nonce }),
+            100_000_000_000_000u64, // 100 TGas: the call yields for the coordinator
+            1,                      // 1 yoctoNEAR
+        )
+        .await
+        .context("Failed to close the payment key")?;
+
+    match refund_ledger(&near, &creds.account_id, nonce).await? {
+        Some(l) if l.closing_since.is_some() => {
+            eprintln!(
+                "Payment key {nonce} is closing. Claim its refund {}: outlayer keys claim {nonce}",
+                l.claimable_at.map(until).unwrap_or_else(|| "in 24 hours".to_string())
+            );
+        }
+        _ => {
+            eprintln!(
+                "The transaction went through but the key is not marked closing: the coordinator \
+                 did not confirm the close in time. The key is still live; run this again."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `outlayer keys claim N` — claim a closed key's refund.
+///
+/// Accepted a day after the close. The worker asks the coordinator what the
+/// key has left; the chain pays at most its own cap of it, deletes the key
+/// and returns its storage deposit. A coordinator that still has a call of
+/// the key in flight refuses, and the key stays closing: claim again later.
+pub async fn claim(network: &NetworkConfig, nonce: u32) -> Result<()> {
+    let creds = config::load_credentials(network)?;
+    let near = NearClient::new(network);
+    let caller = ContractCaller::from_credentials(&creds, network)?;
+
+    let before = refund_ledger(&near, &creds.account_id, nonce).await?;
+    let Some(ledger) = before.as_ref().filter(|l| l.closing_since.is_some()) else {
+        anyhow::bail!(
+            "Payment key {nonce} is not closing. Close it first: outlayer keys close {nonce}"
+        );
+    };
+    if let Some(at) = ledger.claimable_at {
+        if at > now_ns() {
+            anyhow::bail!(
+                "Payment key {nonce} closed too recently: its refund can be claimed {}.",
+                until(at)
+            );
+        }
+    }
+
+    eprintln!("Claiming the refund of payment key {nonce}.");
+    eprintln!(
+        "  Refundable on chain: at most {} (deposited {}, refunded {}).",
+        format_usd(&ledger.refundable_cap),
+        format_usd(&ledger.user_funded),
+        format_usd(&ledger.refunded)
+    );
+    eprintln!("  The key is deleted and its storage deposit returned; its nonce is not reused.");
+
+    let result = caller
+        .call_contract(
+            "claim_payment_key_refund",
+            json!({ "nonce": nonce }),
+            100_000_000_000_000u64, // 100 TGas: the call yields for the coordinator
+            1,                      // 1 yoctoNEAR
+        )
+        .await
+        .context("Failed to claim the refund")?;
+
+    let paid = result
+        .value
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .unwrap_or("0")
+        .to_string();
+
+    if paid != "0" {
+        eprintln!("Refunded {} to {}. Payment key {nonce} is deleted.", format_usd(&paid), creds.account_id);
+        return Ok(());
+    }
+    match refund_ledger(&near, &creds.account_id, nonce).await? {
+        Some(l) if l.closing_since.is_some() => {
+            eprintln!(
+                "Nothing was paid and the key stays closing: the coordinator still has money of this \
+                 key in flight, or did not answer in time. Claim again tomorrow: outlayer keys claim {nonce}"
+            );
+        }
+        _ => {
+            eprintln!(
+                "Payment key {nonce} is deleted; nothing was refundable on chain (deposits made before \
+                 refunds existed, grants and trial credit are spent through the key, not returned)."
+            );
+        }
+    }
     Ok(())
 }
 

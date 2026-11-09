@@ -238,7 +238,17 @@ enum KeysCommands {
         #[arg(long)]
         usd: Option<f64>,
     },
-    /// Delete payment key (refunds storage)
+    /// Stop a payment key and start its refund: no new calls, then `keys claim` after 24 hours
+    Close {
+        /// Payment key nonce
+        nonce: u32,
+    },
+    /// Claim a closed key's refund: the unspent stablecoin deposited on chain comes back, the key is deleted
+    Claim {
+        /// Payment key nonce
+        nonce: u32,
+    },
+    /// Delete payment key (refunds storage; the remaining balance is forfeited — use `keys close` to get it back)
     Delete {
         /// Payment key nonce
         nonce: u32,
@@ -766,6 +776,8 @@ async fn main() -> anyhow::Result<()> {
                         "Say how much: `outlayer keys topup {nonce} --usd 1` sends the stablecoin."
                     ),
                 },
+                KeysCommands::Close { nonce } => commands::keys::close(&network, nonce).await?,
+                KeysCommands::Claim { nonce } => commands::keys::claim(&network, nonce).await?,
                 KeysCommands::Delete { nonce } => {
                     commands::keys::delete(&network, nonce).await?
                 }
