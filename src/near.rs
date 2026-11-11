@@ -431,73 +431,54 @@ impl NearSigner {
         gas: u64,
         deposit: u128,
     ) -> Result<FinalExecutionOutcomeView> {
-        // Get access key nonce
-        let access_key_query = methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
-            request: near_primitives::views::QueryRequest::ViewAccessKey {
-                account_id: self.account_id.clone(),
+        // Signed from a fresh context; refused once for its nonce, signed
+        // again from a fresher one. A refusal here is pre-inclusion: the
+        // transaction never ran, so the second try is the first that can.
+        let mut nonce_refusals = 0u32;
+        loop {
+            let (current_nonce, block_hash) = self.get_tx_context().await?;
+            let transaction_v0 = TransactionV0 {
+                signer_id: self.account_id.clone(),
                 public_key: self.signer.public_key(),
-            },
-        };
+                nonce: current_nonce + 1,
+                receiver_id: receiver_id.clone(),
+                block_hash,
+                actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
+                    method_name: method_name.to_string(),
+                    args: args.to_string().into_bytes(),
+                    gas,
+                    deposit,
+                }))],
+            };
 
-        let access_key_response = self
-            .client
-            .call(access_key_query)
-            .await
-            .context("Failed to query access key")?;
+            let transaction = Transaction::V0(transaction_v0);
+            let signature = self.signer.sign(transaction.get_hash_and_size().0.as_ref());
+            let signed_transaction =
+                near_primitives::transaction::SignedTransaction::new(signature, transaction);
 
-        let current_nonce = match access_key_response.kind {
-            near_jsonrpc_primitives::types::query::QueryResponseKind::AccessKey(access_key) => {
-                access_key.nonce
+            match self
+                .client
+                .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+                    signed_transaction,
+                })
+                .await
+            {
+                Ok(outcome) => return Ok(outcome),
+                Err(e) if is_invalid_nonce(&e) && nonce_refusals < 1 => nonce_refusals += 1,
+                Err(e) => return Err(e).context("Transaction failed"),
             }
-            _ => anyhow::bail!("Unexpected query response for access key"),
-        };
-
-        // Get latest block hash
-        let block = self
-            .client
-            .call(methods::block::RpcBlockRequest {
-                block_reference: BlockReference::Finality(Finality::Final),
-            })
-            .await
-            .context("Failed to query block")?;
-
-        let block_hash = block.header.hash;
-
-        let transaction_v0 = TransactionV0 {
-            signer_id: self.account_id.clone(),
-            public_key: self.signer.public_key(),
-            nonce: current_nonce + 1,
-            receiver_id: receiver_id.clone(),
-            block_hash,
-            actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
-                method_name: method_name.to_string(),
-                args: args.to_string().into_bytes(),
-                gas,
-                deposit,
-            }))],
-        };
-
-        let transaction = Transaction::V0(transaction_v0);
-        let signature = self.signer.sign(transaction.get_hash_and_size().0.as_ref());
-        let signed_transaction =
-            near_primitives::transaction::SignedTransaction::new(signature, transaction);
-
-        let outcome = self
-            .client
-            .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
-                signed_transaction,
-            })
-            .await
-            .context("Transaction failed")?;
-
-        Ok(outcome)
+        }
     }
 
-    /// Get current access key nonce and latest block hash for building transactions.
+    /// The access key's nonce and a block hash to sign the next transaction
+    /// with. The nonce is read at OPTIMISTIC finality: a transaction sent a
+    /// moment ago (by this process, or by near-cli in the same script) has
+    /// already taken the nonce a final read still shows free, and the chain
+    /// refuses the duplicate as `InvalidNonce`. The block hash stays FINAL:
+    /// a transaction built on a block that is then dropped is invalid.
     pub async fn get_tx_context(&self) -> Result<(u64, CryptoHash)> {
         let access_key_query = methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
+            block_reference: BlockReference::Finality(Finality::None),
             request: near_primitives::views::QueryRequest::ViewAccessKey {
                 account_id: self.account_id.clone(),
                 public_key: self.signer.public_key(),
@@ -570,31 +551,7 @@ impl NearSigner {
         // intent explicit at call sites.
         _mpc_contract: &AccountId,
     ) -> Result<FinalExecutionOutcomeView> {
-        let access_key_query = methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
-            request: near_primitives::views::QueryRequest::ViewAccessKey {
-                account_id: self.account_id.clone(),
-                public_key: self.signer.public_key(),
-            },
-        };
-        let access_key_response = self
-            .client
-            .call(access_key_query)
-            .await
-            .context("Failed to query access key")?;
-        let current_nonce = match access_key_response.kind {
-            near_jsonrpc_primitives::types::query::QueryResponseKind::AccessKey(access_key) => {
-                access_key.nonce
-            }
-            _ => anyhow::bail!("Unexpected query response for access key"),
-        };
-        let block = self
-            .client
-            .call(methods::block::RpcBlockRequest {
-                block_reference: BlockReference::Finality(Finality::Final),
-            })
-            .await
-            .context("Failed to query block")?;
+        let (current_nonce, block_hash) = self.get_tx_context().await?;
 
         let actions = vec![
             Action::CreateAccount(CreateAccountAction {}),
@@ -637,7 +594,7 @@ impl NearSigner {
             public_key: self.signer.public_key(),
             nonce: current_nonce + 1,
             receiver_id: vault_account_id.clone(),
-            block_hash: block.header.hash,
+            block_hash,
             actions,
         };
         let transaction = Transaction::V0(transaction_v0);
@@ -698,6 +655,26 @@ impl NearSigner {
 
         Ok(tx_hash)
     }
+}
+
+/// Whether the chain refused a transaction for its nonce: the one refusal
+/// that is this signer's own doing and goes away with a fresh read.
+fn is_invalid_nonce(
+    e: &near_jsonrpc_client::errors::JsonRpcError<
+        near_jsonrpc_primitives::types::transactions::RpcTransactionError,
+    >,
+) -> bool {
+    use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
+    use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
+    use near_primitives::errors::InvalidTxError;
+    matches!(
+        e,
+        JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcTransactionError::InvalidTransaction {
+                context: InvalidTxError::InvalidNonce { .. },
+            }
+        ))
+    )
 }
 
 // ── ContractCaller (local key or wallet API) ────────────────────────
