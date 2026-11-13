@@ -70,12 +70,18 @@ pub async fn run(
     compute_limit: Option<u64>,
     build_target: &str,
     secrets_ref: Option<SecretsRef>,
+    attach_near: Option<String>,
 ) -> Result<()> {
     let input_value = parse_input(input, input_file)?;
+    let attach_yocto = attach_near.as_deref().map(parse_near).transpose()?;
 
     // HTTPS API only works for Project source with payment key
     if let RunSource::Project { ref project_id, ref version } = source {
         if let Ok(payment_key) = find_payment_key() {
+            anyhow::ensure!(
+                attach_yocto.is_none(),
+                "--attach-near is for on-chain runs; this one goes over HTTPS with your payment key"
+            );
             return run_https(
                 network,
                 project_id,
@@ -97,7 +103,7 @@ pub async fn run(
     }
 
     eprintln!("Executing on-chain with NEAR deposit.\n");
-    run_on_chain(network, &source, input_value, compute_limit, build_target, secrets_ref).await
+    run_on_chain(network, &source, input_value, compute_limit, build_target, secrets_ref, attach_yocto).await
 }
 
 /// Execute via HTTPS API (Project source + payment key)
@@ -179,6 +185,20 @@ fn print_sync_result(response: &crate::api::HttpsCallResponse) -> Result<()> {
 
 #[cfg(test)]
 mod sync_result_tests {
+    #[test]
+    fn a_near_amount_is_read_exactly() {
+        assert_eq!(super::parse_near("0.5").unwrap(), 5 * 10u128.pow(23));
+        assert_eq!(super::parse_near("2").unwrap(), 2 * 10u128.pow(24));
+        assert_eq!(super::parse_near(".000001").unwrap(), 10u128.pow(18));
+        assert_eq!(super::parse_near("0.000000000000000000000001").unwrap(), 1);
+        assert!(super::parse_near("0.0000000000000000000000001").is_err(), "below one yocto");
+        assert!(super::parse_near("1e3").is_err());
+        assert!(super::parse_near("").is_err());
+        assert!(super::parse_near("-1").is_err());
+        assert_eq!(super::near_str(5 * 10u128.pow(23)), "0.5");
+        assert_eq!(super::near_str(13_000_200_000_000_000_000_000), "0.0130002");
+    }
+
     use super::print_sync_result;
     use crate::api::HttpsCallResponse;
 
@@ -206,6 +226,33 @@ mod sync_result_tests {
     }
 }
 
+/// A NEAR amount ("0.5", "2", "0.000001") in yoctoNEAR, exactly.
+fn parse_near(s: &str) -> Result<u128> {
+    let s = s.trim();
+    let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
+    anyhow::ensure!(
+        !(whole.is_empty() && frac.is_empty())
+            && whole.chars().all(|c| c.is_ascii_digit())
+            && frac.chars().all(|c| c.is_ascii_digit())
+            && frac.len() <= 24,
+        "not a NEAR amount: {s:?} (e.g. 0.5)"
+    );
+    let whole: u128 = if whole.is_empty() { 0 } else { whole.parse()? };
+    let frac: u128 = format!("{frac:0<24}").parse()?;
+    whole
+        .checked_mul(10u128.pow(24))
+        .and_then(|w| w.checked_add(frac))
+        .ok_or_else(|| anyhow::anyhow!("NEAR amount too large: {s}"))
+}
+
+/// yoctoNEAR as NEAR, for messages.
+fn near_str(yocto: u128) -> String {
+    let whole = yocto / 10u128.pow(24);
+    let frac = format!("{:024}", yocto % 10u128.pow(24));
+    let frac = frac.trim_end_matches('0');
+    if frac.is_empty() { whole.to_string() } else { format!("{whole}.{frac}") }
+}
+
 /// Execute on-chain via request_execution (any source type)
 async fn run_on_chain(
     network: &NetworkConfig,
@@ -214,6 +261,7 @@ async fn run_on_chain(
     compute_limit: Option<u64>,
     build_target: &str,
     secrets_ref: Option<SecretsRef>,
+    attach_yocto: Option<u128>,
 ) -> Result<()> {
     let creds = config::load_credentials(network)?;
     let near = NearClient::new(network);
@@ -229,16 +277,29 @@ async fn run_on_chain(
 
     // Estimate cost
     let cost_str: String = near
-        .estimate_execution_cost(Some(resource_limits.clone()), input_data.len())
+        .estimate_execution_cost(Some(resource_limits.clone()), input_data.len(), 0)
         .await?;
     let cost_yocto: u128 = cost_str
         .trim_matches('"')
         .parse()
         .context("Failed to parse execution cost")?;
 
-    let cost_near = cost_yocto as f64 / 1e24;
+    // The estimate covers compute and the input; a stored output (1 KB or more) needs more,
+    // which --attach-near provides. Whatever the run does not use is refunded.
+    let deposit_yocto = match attach_yocto {
+        Some(attach) if attach < cost_yocto => anyhow::bail!(
+            "--attach-near is {} NEAR; this request needs at least {} NEAR (compute and input)",
+            near_str(attach),
+            near_str(cost_yocto)
+        ),
+        Some(attach) => attach,
+        None => cost_yocto,
+    };
     let label = source.label();
-    eprintln!("Running {label} (on-chain, ~{cost_near:.4} NEAR)...");
+    eprintln!(
+        "Running {label} (on-chain, attaching {} NEAR; what the run does not use is refunded)...",
+        near_str(deposit_yocto)
+    );
 
     let source_json = source.to_contract_json(build_target).await?;
     let gas = 300_000_000_000_000u64; // 300 TGas
@@ -260,7 +321,7 @@ async fn run_on_chain(
                 "params": null
             }),
             gas,
-            cost_yocto,
+            deposit_yocto,
         )
         .await
         .context("On-chain execution failed")?;

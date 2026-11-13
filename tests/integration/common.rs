@@ -103,7 +103,7 @@ impl TestContext {
         let input_data = serde_json::to_string(&input).unwrap();
         let cost_str = self
             .near
-            .estimate_execution_cost(Some(resource_limits.clone()), input_data.len())
+            .estimate_execution_cost(Some(resource_limits.clone()), input_data.len(), 0)
             .await
             .expect("estimate_execution_cost failed");
         let cost_yocto: u128 = cost_str.trim_matches('"').parse().expect("bad cost");

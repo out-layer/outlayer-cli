@@ -115,6 +115,12 @@ enum Commands {
         /// Account that owns the secrets (requires --secrets-profile)
         #[arg(long)]
         secrets_account: Option<String>,
+
+        /// NEAR to attach to an on-chain run instead of the estimate (e.g. 0.5). The run takes what
+        /// it needs — compute, and the storage of an input above 32 KB and of an output of 1 KB or
+        /// more while it is pending — and the rest comes back. At least the estimate for the input
+        #[arg(long)]
+        attach_near: Option<String>,
     },
     /// Manage payment keys
     Keys {
@@ -733,6 +739,7 @@ async fn main() -> anyhow::Result<()> {
             target,
             secrets_profile,
             secrets_account,
+            attach_near,
         } => {
             let network = resolve_with_project(env_net)?;
             let source = if let Some(url) = wasm {
@@ -752,7 +759,7 @@ async fn main() -> anyhow::Result<()> {
             };
             commands::run::run(
                 &network, source, input, input_file, is_async, deposit, compute_limit,
-                &target, secrets_ref,
+                &target, secrets_ref, attach_near,
             )
             .await?;
         }

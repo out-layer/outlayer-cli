@@ -93,6 +93,12 @@ outlayer run alice.near/my-agent --input request.json             # input from f
 outlayer run alice.near/my-agent '{"command": "heavy"}' --async           # async (HTTPS only)
 outlayer run alice.near/my-agent '{"command": "premium"}' --deposit 0.01  # attached deposit
 outlayer run alice.near/my-agent '{}' --compute-limit 1000000000          # custom compute limit
+outlayer run --wasm <url> '{}' --attach-near 0.5                         # on-chain: attach 0.5 NEAR, unused refunded
+
+# On-chain, the CLI attaches the estimate for the compute and the input it sends. An output of
+# 1 KB or more is held in the contract until the request settles, at 0.00001 NEAR per byte, out of
+# what is attached: a run whose output does not fit fails with `output_storage_unpaid:` and the
+# amount to attach. --attach-near attaches more; whatever the run does not use is refunded.
 
 # Attach secrets to execution (secrets must be stored via `outlayer secrets set`)
 outlayer run alice.near/my-agent '{}' --secrets-profile default --secrets-account alice.near

@@ -350,17 +350,23 @@ impl NearClient {
         .await
     }
 
-    /// What `request_execution` requires attached for these limits and an
-    /// `input_data` of `input_len` bytes (the contract holds a deposit for the
-    /// bytes beyond its free allowance and returns it at settlement).
+    /// What `request_execution` requires attached for these limits, an
+    /// `input_data` of `input_len` bytes and an output of up to `output_len`
+    /// bytes. The contract holds a deposit for the input beyond 32 KB and for
+    /// every byte of a stored output, and returns it at settlement.
     pub async fn estimate_execution_cost(
         &self,
         resource_limits: Option<Value>,
         input_len: usize,
+        output_len: usize,
     ) -> Result<String> {
         self.view_call(
             "estimate_execution_cost",
-            serde_json::json!({ "resource_limits": resource_limits, "input_len": input_len }),
+            serde_json::json!({
+                "resource_limits": resource_limits,
+                "input_len": input_len,
+                "output_len": output_len,
+            }),
         )
         .await
     }
