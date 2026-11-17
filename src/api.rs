@@ -688,6 +688,7 @@ impl ApiClient {
                             .map(String::from),
                         result: err.get("failure").cloned(),
                         approval_id: None,
+                        poll_url: None,
                     });
                 }
             }
@@ -1080,6 +1081,9 @@ pub struct WalletCallResponse {
     pub tx_hash: Option<String>,
     pub result: Option<serde_json::Value>,
     pub approval_id: Option<String>,
+    /// Set with `status: "processing"`: where the request's outcome is read.
+    #[serde(default)]
+    pub poll_url: Option<String>,
 }
 
 // ── Payment Check Response Types ──────────────────────────────────────

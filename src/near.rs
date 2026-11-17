@@ -807,6 +807,9 @@ impl ContractCaller {
                     }
                     anyhow::bail!("Transaction requires approval.");
                 }
+                if resp.status == "processing" {
+                    anyhow::bail!("{}", processing_message(&resp));
+                }
                 if resp.status != "success" {
                     let detail = resp.result.as_ref().map(|v| v.to_string()).unwrap_or_default();
                     let tx_info = resp.tx_hash.as_deref().unwrap_or("unknown");
@@ -822,6 +825,23 @@ impl ContractCaller {
             }
         }
     }
+}
+
+/// A call the wallet sent and the node did not confirm in time: not a failure, and not to be
+/// sent again — it is charged, and a second send is a second call.
+fn processing_message(resp: &crate::api::WalletCallResponse) -> String {
+    let poll = resp
+        .poll_url
+        .clone()
+        .unwrap_or_else(|| format!("/wallet/v1/requests/{}", resp.request_id));
+    format!(
+        "Transaction sent, outcome not confirmed yet (request: {}, tx: {}). It may still \
+         complete: read GET {} for its outcome. Do not send it again — that would be a second \
+         call.",
+        resp.request_id,
+        resp.tx_hash.as_deref().unwrap_or("unknown"),
+        poll
+    )
 }
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -1004,5 +1024,20 @@ mod paged_view_tests {
 
         assert!(result.is_err(), "the caller must not receive a partial list");
         assert_eq!(*asked.borrow(), vec![0, 10]);
+    }
+}
+
+#[cfg(test)]
+mod processing_tests {
+    #[test]
+    fn a_processing_call_is_reported_as_sent_not_failed() {
+        let resp: crate::api::WalletCallResponse = serde_json::from_str(
+            r#"{"request_id":"r1","status":"processing","tx_hash":"Hx","poll_url":"/wallet/v1/requests/r1"}"#,
+        )
+        .unwrap();
+        let msg = super::processing_message(&resp);
+        assert!(msg.contains("r1") && msg.contains("Hx") && msg.contains("/wallet/v1/requests/r1"), "{msg}");
+        assert!(!msg.contains("failed"), "{msg}");
+        assert!(msg.contains("Do not send it again"), "{msg}");
     }
 }
