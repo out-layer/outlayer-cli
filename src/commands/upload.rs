@@ -196,7 +196,7 @@ pub async fn upload(
         eprintln!("  outlayer run --wasm {fastfs_url} '{{}}' ");
         eprintln!();
         eprintln!("Or deploy as project version:");
-        eprintln!("  outlayer deploy <name> --wasm-url {fastfs_url}");
+        eprintln!("  outlayer deploy <name> {fastfs_url}");
     }
 
     Ok(())
