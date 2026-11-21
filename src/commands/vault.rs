@@ -38,7 +38,33 @@ pub struct VaultStateView {
     pub registered_tee_keys: Vec<String>,
     pub recovery: Option<RecoveryStateView>,
     pub unlocked: bool,
+    /// The exit window in force.
     pub unilateral_exit_window_secs: u64,
+    /// A lowering of the window that is not in force yet.
+    #[serde(default)]
+    pub pending_exit_window: Option<PendingExitWindowView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PendingExitWindowView {
+    pub secs: u64,
+    /// Block timestamp, ns, from which `secs` is the window.
+    pub effective_at: u64,
+}
+
+impl VaultStateView {
+    /// The exit window as a person reads it: the one in force, and a lowering on its way.
+    fn exit_window_human(&self) -> String {
+        match &self.pending_exit_window {
+            Some(p) => format!(
+                "{} (lowering to {} at unix time {})",
+                format_seconds_human(self.unilateral_exit_window_secs),
+                format_seconds_human(p.secs),
+                p.effective_at / 1_000_000_000
+            ),
+            None => format_seconds_human(self.unilateral_exit_window_secs),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -592,10 +618,7 @@ pub async fn status(network: &NetworkConfig, account: &str) -> Result<()> {
         "Status:          {}",
         if state.unlocked { "UNLOCKED (recovered)" } else { "locked (TEE-controlled)" },
     );
-    println!(
-        "Exit window:     {}",
-        format_seconds_human(state.unilateral_exit_window_secs),
-    );
+    println!("Exit window:     {}", state.exit_window_human());
     match &state.initial_tee_key {
         Some(k) => println!("Initial TEE key: {k}"),
         None => println!("Initial TEE key: (none — pre-launch test vault)"),
@@ -766,10 +789,7 @@ pub async fn verify(network: &NetworkConfig, account: &str) -> Result<()> {
             rec.trigger, rec.finalize_after
         ));
     }
-    println!(
-        "      exit window                    : {}",
-        format_seconds_human(state.unilateral_exit_window_secs)
-    );
+    println!("      exit window                    : {}", state.exit_window_human());
     println!(
         "      initial_tee_key                : {}",
         state.initial_tee_key.as_deref().unwrap_or("(none — legacy vault)")
@@ -1105,8 +1125,12 @@ pub async fn finalize_recovery(
 }
 
 /// `outlayer vault set-exit-window <account> <window>` — parent-only.
-/// Updates `unilateral_exit_window_secs`. In-flight recoveries are not
-/// affected (their finalize timestamps are frozen at initiate time).
+/// A longer window is in force at once. A shorter one: on a vault that shows
+/// `pending_exit_window` in its state, only after the window in force has
+/// elapsed, so a stolen parent key cannot shorten the wait it faces; on a vault
+/// deployed before that, at once.
+/// In-flight recoveries are not affected (their finalize timestamps are frozen
+/// at initiate time).
 pub async fn set_exit_window(
     network: &NetworkConfig,
     account: &str,
@@ -1130,8 +1154,8 @@ pub async fn set_exit_window(
         .context("set_exit_window failed")?;
     print_tx_hash(&result.tx_hash);
     eprintln!(
-        "Exit window updated. Future `unilateral-initiate-recovery` calls will use {}.",
-        format_seconds_human(secs)
+        "Sent. `outlayer vault status {account}` shows the window in force, and a lowering that waits \
+         for it to pass when the vault delays one."
     );
     Ok(())
 }
