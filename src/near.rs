@@ -52,6 +52,14 @@ where
 
 // ── NearClient (view calls, no auth) ───────────────────────────────────
 
+/// How long a transaction that has executed is given to reach a final block:
+/// finality follows execution by two or three blocks.
+const FINALITY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long to wait before asking again about a transaction a node had no
+/// answer for. The next block is about a second away; asking sooner gets the
+/// same answer.
+const FINALITY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub struct NearClient {
     client: JsonRpcClient,
     pub network: NetworkConfig,
@@ -276,6 +284,69 @@ impl NearClient {
             .view_call("get_project", serde_json::json!({ "project_id": project_id }))
             .await?;
         Ok(result)
+    }
+
+    /// Wait until the transaction `tx_hash`, sent by `sender`, is in a FINAL
+    /// block. A transaction call answers once the transaction has executed,
+    /// two or three blocks before its block is final, and the views of this
+    /// client read at final finality: one made after this wait sees what the
+    /// transaction wrote.
+    ///
+    /// A node that has not seen the transaction yet, one that gave up waiting
+    /// (its own timeout, a 408), one that is unavailable (a 503), or no answer
+    /// at all says nothing about it, so the status is asked again until
+    /// [`FINALITY_WAIT`]. Any other answer is
+    /// the error. Only the status read is repeated, never the transaction.
+    pub async fn wait_until_final(&self, tx_hash: &str, sender: &str) -> Result<()> {
+        use near_jsonrpc_client::errors::{
+            JsonRpcError, JsonRpcServerError, JsonRpcServerResponseStatusError,
+        };
+        use near_jsonrpc_primitives::types::transactions::{RpcTransactionError, TransactionInfo};
+        use near_primitives::views::TxExecutionStatus;
+
+        let hash: CryptoHash = tx_hash
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid transaction hash '{tx_hash}': {e}"))?;
+        let sender: AccountId = sender
+            .parse()
+            .with_context(|| format!("Invalid account_id '{sender}'"))?;
+
+        let deadline = tokio::time::Instant::now() + FINALITY_WAIT;
+        loop {
+            let request = methods::tx::RpcTransactionStatusRequest {
+                transaction_info: TransactionInfo::TransactionId {
+                    tx_hash: hash,
+                    sender_account_id: sender.clone(),
+                },
+                wait_until: TxExecutionStatus::Final,
+            };
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let error = match tokio::time::timeout(left, self.client.call(request)).await {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(e)) => e,
+                Err(_) => anyhow::bail!("its block is not final after {} s", FINALITY_WAIT.as_secs()),
+            };
+            let says_nothing = matches!(
+                error.handler_error(),
+                Some(RpcTransactionError::UnknownTransaction { .. })
+                    | Some(RpcTransactionError::TimeoutError)
+            ) || matches!(
+                error,
+                JsonRpcError::TransportError(_)
+                    | JsonRpcError::ServerError(JsonRpcServerError::ResponseStatusError(
+                        JsonRpcServerResponseStatusError::TimeoutError
+                            | JsonRpcServerResponseStatusError::ServiceUnavailable
+                    ))
+            );
+            if !says_nothing {
+                return Err(anyhow::Error::from(error))
+                    .context("the node could not say whether its block is final");
+            }
+            if tokio::time::Instant::now() + FINALITY_POLL >= deadline {
+                anyhow::bail!("its block is not final after {} s", FINALITY_WAIT.as_secs());
+            }
+            tokio::time::sleep(FINALITY_POLL).await;
+        }
     }
 
     /// The next free payment-key nonce, read at OPTIMISTIC finality: a final
@@ -1039,5 +1110,163 @@ mod processing_tests {
         assert!(msg.contains("r1") && msg.contains("Hx") && msg.contains("/wallet/v1/requests/r1"), "{msg}");
         assert!(!msg.contains("failed"), "{msg}");
         assert!(msg.contains("Do not send it again"), "{msg}");
+    }
+}
+
+/// A JSON-RPC endpoint for tests: one connection per request (every answer
+/// says `Connection: close`), answered by a closure over the request's JSON.
+#[cfg(test)]
+pub(crate) mod fake_rpc {
+    use std::io::{Read, Write};
+
+    /// An HTTP status and a body.
+    pub type Answer = (u16, String);
+
+    /// Serve requests until the test process ends; returns the URL.
+    pub fn serve<F>(answer: F) -> String
+    where
+        F: Fn(&serde_json::Value) -> Answer + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.expect("accept");
+                let request = read_body(&mut stream);
+                let (status, body) = answer(&request);
+                let reply = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn read_body(stream: &mut std::net::TcpStream) -> serde_json::Value {
+        let mut data = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&data);
+            if let Some(end) = text.find("\r\n\r\n") {
+                let length = text[..end]
+                    .lines()
+                    .find_map(|l| {
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if data.len() >= end + 4 + length {
+                    return serde_json::from_slice(&data[end + 4..end + 4 + length]).expect("json body");
+                }
+            }
+        }
+        serde_json::Value::Null
+    }
+
+    /// A `tx` answer: the transaction's block is final.
+    pub fn tx_final() -> Answer {
+        (200, r#"{"jsonrpc":"2.0","id":"dontcare","result":{"final_execution_status":"FINAL"}}"#.to_string())
+    }
+
+    /// A `tx` answer: the node has not seen the transaction.
+    pub fn tx_unknown() -> Answer {
+        (200, r#"{"jsonrpc":"2.0","id":"dontcare","error":{"name":"HANDLER_ERROR","cause":{"name":"UNKNOWN_TRANSACTION","info":{"requested_transaction_hash":"11111111111111111111111111111111"}},"code":-32000,"message":"Server error","data":"unknown"}}"#.to_string())
+    }
+
+    /// A `tx` answer: the node gave up waiting, with the status nearcore sends.
+    pub fn tx_timeout_408() -> Answer {
+        (408, r#"{"jsonrpc":"2.0","id":"dontcare","error":{"name":"HANDLER_ERROR","cause":{"name":"TIMEOUT_ERROR"},"code":-32000,"message":"Server error","data":"timeout"}}"#.to_string())
+    }
+
+    /// A `tx` answer: the node, or the load balancer before it, is unavailable.
+    pub fn tx_unavailable_503() -> Answer {
+        (503, "Service Unavailable".to_string())
+    }
+
+    /// A `tx` answer about the transaction itself: it is invalid. The cause
+    /// carries no detail; the client reads it from `data`, as nearcore sends it.
+    pub fn tx_invalid() -> Answer {
+        (200, r#"{"jsonrpc":"2.0","id":"dontcare","error":{"name":"HANDLER_ERROR","cause":{"name":"INVALID_TRANSACTION","info":{}},"code":-32000,"message":"Server error","data":{"TxExecutionError":{"InvalidTxError":{"InvalidNonce":{"tx_nonce":1,"ak_nonce":2}}}}}}"#.to_string())
+    }
+
+    /// A `query` answer to a view call that returned `value`.
+    pub fn view_result(value: &serde_json::Value) -> Answer {
+        let bytes: Vec<u8> = value.to_string().into_bytes();
+        (
+            200,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "dontcare",
+                "result": {
+                    "result": bytes,
+                    "logs": [],
+                    "block_height": 1,
+                    "block_hash": "11111111111111111111111111111111"
+                }
+            })
+            .to_string(),
+        )
+    }
+
+    /// A network config whose RPC is `url`.
+    pub fn network(url: &str) -> crate::config::NetworkConfig {
+        let mut network = crate::config::NetworkConfig::testnet();
+        network.rpc_url = url.to_string();
+        network
+    }
+}
+
+#[cfg(test)]
+mod finality_tests {
+    use super::fake_rpc::*;
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const HASH: &str = "11111111111111111111111111111111";
+
+    /// `tx` requests answered from `answers` in order; counts them.
+    fn tx_server(answers: Vec<Answer>) -> (String, Arc<AtomicUsize>) {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counted = asked.clone();
+        let url = serve(move |request| {
+            assert_eq!(request["method"], "tx", "{request}");
+            assert_eq!(request["params"]["wait_until"], "FINAL", "{request}");
+            let i = counted.fetch_add(1, Ordering::SeqCst);
+            answers[i].clone()
+        });
+        (url, asked)
+    }
+
+    /// A node that has not seen the transaction, gave up waiting with a 408,
+    /// or is unavailable with a 503, is asked again; the wait ends when one
+    /// says the block is final.
+    #[tokio::test]
+    async fn the_finality_wait_asks_again_until_a_node_says_final() {
+        let (url, asked) = tx_server(vec![tx_unknown(), tx_timeout_408(), tx_unavailable_503(), tx_final()]);
+        NearClient::new(&network(&url))
+            .wait_until_final(HASH, "alice.testnet")
+            .await
+            .expect("final on the fourth answer");
+        assert_eq!(asked.load(Ordering::SeqCst), 4);
+    }
+
+    /// Any other answer of the node is the error, at once.
+    #[tokio::test]
+    async fn the_finality_wait_ends_on_an_answer_about_the_transaction() {
+        let (url, asked) = tx_server(vec![tx_invalid(), tx_final()]);
+        let e = NearClient::new(&network(&url))
+            .wait_until_final(HASH, "alice.testnet")
+            .await
+            .expect_err("an invalid transaction is not waited on");
+        assert!(format!("{e:#}").contains("could not say whether its block is final"), "{e:#}");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 }

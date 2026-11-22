@@ -329,6 +329,29 @@ async fn refund_ledger(near: &NearClient, owner: &str, nonce: u32) -> Result<Opt
     .context("Failed to read the key's refund ledger from the contract")
 }
 
+/// The refund ledger as the transaction `tx_hash` of `owner` left it.
+///
+/// A contract call answers once its transaction has executed, two or three
+/// blocks before its block is final, and the ledger is read at final finality:
+/// read at once, it shows the key as it was before the call. The read waits
+/// until the block is final.
+async fn refund_ledger_once_final(
+    near: &NearClient,
+    owner: &str,
+    nonce: u32,
+    method: &str,
+    tx_hash: Option<&str>,
+) -> Result<Option<RefundLedgerView>> {
+    let tx_hash = tx_hash
+        .with_context(|| format!("{method} went through, and no transaction hash came back to wait on"))?;
+    near.wait_until_final(tx_hash, owner)
+        .await
+        .with_context(|| format!("{method} executed in {tx_hash}"))?;
+    refund_ledger(near, owner, nonce)
+        .await
+        .with_context(|| format!("{method} executed in {tx_hash}, and is final"))
+}
+
 fn now_ns() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -383,7 +406,7 @@ pub async fn close(network: &NetworkConfig, nonce: u32) -> Result<()> {
     eprintln!("  would go back to the swap account, not to you.");
     eprintln!("  In 24 hours: `outlayer keys claim {nonce}` pays it out and deletes the key (one claim a day).");
 
-    caller
+    let closed = caller
         .call_contract(
             "close_payment_key",
             json!({ "nonce": nonce }),
@@ -393,7 +416,12 @@ pub async fn close(network: &NetworkConfig, nonce: u32) -> Result<()> {
         .await
         .context("Failed to close the payment key")?;
 
-    match refund_ledger(&near, &creds.account_id, nonce).await? {
+    let after = refund_ledger_once_final(&near, &creds.account_id, nonce, "close_payment_key", closed.tx_hash.as_deref())
+        .await
+        .with_context(|| {
+            format!("Run `outlayer keys close {nonce}` again in a moment: it says whether the key is closing")
+        })?;
+    match after {
         Some(l) if l.closing_since.is_some() => {
             eprintln!(
                 "Payment key {nonce} is closing. Claim its refund {}: outlayer keys claim {nonce}",
@@ -466,7 +494,12 @@ pub async fn claim(network: &NetworkConfig, nonce: u32) -> Result<()> {
         eprintln!("Refunded {} to {}. Payment key {nonce} is deleted.", format_usd(&paid), creds.account_id);
         return Ok(());
     }
-    match refund_ledger(&near, &creds.account_id, nonce).await? {
+    let after = refund_ledger_once_final(&near, &creds.account_id, nonce, "claim_payment_key_refund", result.tx_hash.as_deref())
+        .await
+        .with_context(|| {
+            format!("Nothing was paid. `outlayer keys list` no longer lists key {nonce} once it is deleted")
+        })?;
+    match after {
         Some(l) if l.closing_since.is_some() => {
             eprintln!(
                 "Nothing was paid and the key stays closing: the coordinator still has money of this \
@@ -516,5 +549,83 @@ mod project_scope_tests {
         for bad in ["compliance-gateway", "/app", "alice.near/", "a/b/c", "alice.near/app*", "alice near/app"] {
             assert!(check_project_scope(bad).is_err(), "{bad} must be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod read_back_tests {
+    use super::*;
+    use crate::near::fake_rpc::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    const HASH: &str = "11111111111111111111111111111111";
+
+    /// A chain where a call has executed and its block is not final yet: a
+    /// view at final shows `before` until a `tx` request has been answered
+    /// FINAL (the first one is answered "unknown"), and `after` from then on.
+    fn chain(before: serde_json::Value, after: serde_json::Value) -> NearClient {
+        let final_seen = Arc::new(AtomicBool::new(false));
+        let tx_asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = serve(move |request| match request["method"].as_str() {
+            Some("tx") => {
+                if tx_asked.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tx_unknown()
+                } else {
+                    final_seen.store(true, Ordering::SeqCst);
+                    tx_final()
+                }
+            }
+            Some("query") => {
+                assert_eq!(request["params"]["finality"], "final", "{request}");
+                assert_eq!(request["params"]["method_name"], "get_payment_key_refund_ledger", "{request}");
+                view_result(if final_seen.load(Ordering::SeqCst) { &after } else { &before })
+            }
+            other => panic!("unexpected method {other:?}"),
+        });
+        NearClient::new(&network(&url))
+    }
+
+    fn ledger(closing: bool) -> serde_json::Value {
+        json!({
+            "user_funded": "5000000",
+            "refunded": "0",
+            "refundable_cap": "5000000",
+            "closing_since": if closing { json!(1_700_000_000_000_000_000u64) } else { json!(null) },
+            "claimable_at": if closing { json!(1_700_086_400_000_000_000u64) } else { json!(null) },
+        })
+    }
+
+    /// `keys close` reads the key as closing: the close marks it in its last
+    /// receipt, which a read at final sees only once the block is final.
+    #[tokio::test]
+    async fn a_close_is_read_back_once_its_block_is_final() {
+        let near = chain(ledger(false), ledger(true));
+        let read = refund_ledger_once_final(&near, "alice.testnet", 7, "close_payment_key", Some(HASH))
+            .await
+            .expect("read");
+        assert!(read.is_some_and(|l| l.closing_since.is_some()), "the key reads as closing");
+    }
+
+    /// `keys claim` that paid nothing reads the key as deleted, not as still
+    /// closing.
+    #[tokio::test]
+    async fn a_claim_is_read_back_once_its_block_is_final() {
+        let near = chain(ledger(true), json!(null));
+        let read = refund_ledger_once_final(&near, "alice.testnet", 7, "claim_payment_key_refund", Some(HASH))
+            .await
+            .expect("read");
+        assert!(read.is_none(), "the key reads as deleted");
+    }
+
+    /// A call that came back with no transaction hash is not read as if
+    /// nothing had happened.
+    #[tokio::test]
+    async fn no_hash_is_an_error_that_says_the_call_went_through() {
+        let near = chain(ledger(false), ledger(true));
+        let e = refund_ledger_once_final(&near, "alice.testnet", 7, "close_payment_key", None)
+            .await
+            .expect_err("nothing to wait on");
+        assert!(format!("{e:#}").contains("close_payment_key went through"), "{e:#}");
     }
 }
