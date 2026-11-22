@@ -916,7 +916,7 @@ pub async fn set(
                     accessor: accessor.coordinator.clone(),
                     owner: creds.account_id.clone(),
                     profile: Some(profile.to_string()),
-                    secrets_json: secrets_str.clone(),
+                    secrets_json: crate::api::secret_names_only(secrets_map.as_ref().unwrap()),
                 },
                 vault_id.as_deref(),
             )
@@ -937,7 +937,7 @@ pub async fn set(
                         accessor: accessor.coordinator.clone(),
                         owner: creds.account_id.clone(),
                         profile: Some(profile.to_string()),
-                        secrets_json: secrets_str.clone(),
+                        secrets_json: crate::api::secret_names_only(map),
                     },
                     vault_id.as_deref(),
                 )
@@ -962,7 +962,7 @@ pub async fn set(
                 "profile": profile,
                 "encrypted_secrets_base64": encrypted_base64,
                 "new_secrets": new_secrets,
-            }))
+            }), vault_id.as_deref())
             .await
             .context("Failed to generate protected secrets")?;
 

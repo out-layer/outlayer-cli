@@ -50,6 +50,19 @@ pub struct GetPubkeyRequest {
     pub secrets_json: String,
 }
 
+/// The secrets as the keystore checks them before they are sealed: the names,
+/// each with an empty value. The keystore refuses a reserved name or a
+/// `PROTECTED_` one and reads nothing else, so this request carries no value.
+pub fn secret_names_only(secrets: &serde_json::Map<String, Value>) -> String {
+    Value::Object(
+        secrets
+            .keys()
+            .map(|name| (name.clone(), Value::String(String::new())))
+            .collect(),
+    )
+    .to_string()
+}
+
 impl ApiClient {
     pub fn new(network: &NetworkConfig) -> Self {
         Self {
@@ -225,17 +238,23 @@ impl ApiClient {
             .context("Failed to parse earnings history")
     }
 
-    /// POST /secrets/add_generated_secret — generate PROTECTED_* in TEE
+    /// POST /secrets/add_generated_secret — generate PROTECTED_* in TEE.
+    ///
+    /// `vault_id` is forwarded as `X-Customer-Vault`, as for the public key:
+    /// what is generated joins the row under the master its manual part was
+    /// sealed to.
     pub async fn add_generated_secret(
         &self,
         req: &Value,
+        vault_id: Option<&str>,
     ) -> Result<AddGeneratedSecretResponse> {
         let url = format!("{}/secrets/add_generated_secret", self.base_url);
 
-        let response = self
-            .client
-            .post(&url)
-            .json(req)
+        let mut request = self.client.post(&url).json(req);
+        if let Some(vault) = vault_id {
+            request = request.header("X-Customer-Vault", vault);
+        }
+        let response = request
             .send()
             .await
             .context("Failed to call add_generated_secret")?;
@@ -1330,6 +1349,21 @@ pub struct PreparedAgentSecretDelete {
     pub args: Value,
     pub gas: String,
     pub agent_account: String,
+}
+
+#[cfg(test)]
+mod secret_names_only_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_every_name_and_drops_every_value() {
+        let secrets: serde_json::Map<String, Value> =
+            serde_json::from_str(r#"{"API_KEY":"sk-live-123","NESTED":{"a":1},"EMPTY":""}"#).unwrap();
+        let sent: serde_json::Map<String, Value> = serde_json::from_str(&secret_names_only(&secrets)).unwrap();
+        assert_eq!(sent.keys().collect::<Vec<_>>(), secrets.keys().collect::<Vec<_>>());
+        assert!(sent.values().all(|v| v == &Value::String(String::new())));
+        assert!(!secret_names_only(&secrets).contains("sk-live-123"));
+    }
 }
 
 #[cfg(test)]

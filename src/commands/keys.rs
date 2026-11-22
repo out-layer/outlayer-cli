@@ -56,7 +56,9 @@ pub async fn create(network: &NetworkConfig, projects: &[String]) -> Result<()> 
                 accessor: json!({ "type": "System", "PaymentKey": {} }),
                 owner: creds.account_id.clone(),
                 profile: Some(nonce.to_string()),
-                secrets_json: secrets_json.clone(),
+                // The keystore checks names only; a payment key's names are
+                // fixed, so nothing is sent, as the dashboard does.
+                secrets_json: "{}".to_string(),
             },
             // Payment keys are owner-scoped, never vault-bound — the
             // System(PaymentKey) accessor doesn't take a vault_id.
