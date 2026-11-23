@@ -508,27 +508,40 @@ impl NearSigner {
         gas: u64,
         deposit: u128,
     ) -> Result<FinalExecutionOutcomeView> {
-        // Signed from a fresh context; refused once for its nonce, signed
-        // again from a fresher one. A refusal here is pre-inclusion: the
-        // transaction never ran, so the second try is the first that can.
+        let actions = vec![Action::FunctionCall(Box::new(FunctionCallAction {
+            method_name: method_name.to_string(),
+            args: args.to_string().into_bytes(),
+            gas,
+            deposit,
+        }))];
+        self.commit_actions(receiver_id, actions)
+            .await
+            .context("Transaction failed")
+    }
+
+    /// Sign `actions` to `receiver_id` as one transaction and block until it
+    /// is executed (`broadcast_tx_commit`).
+    ///
+    /// Signed from a fresh context; refused once for its nonce, signed
+    /// again from a fresher one. A refusal here is pre-inclusion: the
+    /// transaction never ran, so the second try is the first that can. Any
+    /// other failure is returned as it is and nothing is sent again.
+    async fn commit_actions(
+        &self,
+        receiver_id: &AccountId,
+        actions: Vec<Action>,
+    ) -> Result<FinalExecutionOutcomeView> {
         let mut nonce_refusals = 0u32;
         loop {
             let (current_nonce, block_hash) = self.get_tx_context().await?;
-            let transaction_v0 = TransactionV0 {
+            let transaction = Transaction::V0(TransactionV0 {
                 signer_id: self.account_id.clone(),
                 public_key: self.signer.public_key(),
                 nonce: current_nonce + 1,
                 receiver_id: receiver_id.clone(),
                 block_hash,
-                actions: vec![Action::FunctionCall(Box::new(FunctionCallAction {
-                    method_name: method_name.to_string(),
-                    args: args.to_string().into_bytes(),
-                    gas,
-                    deposit,
-                }))],
-            };
-
-            let transaction = Transaction::V0(transaction_v0);
+                actions: actions.clone(),
+            });
             let signature = self.signer.sign(transaction.get_hash_and_size().0.as_ref());
             let signed_transaction =
                 near_primitives::transaction::SignedTransaction::new(signature, transaction);
@@ -542,7 +555,7 @@ impl NearSigner {
             {
                 Ok(outcome) => return Ok(outcome),
                 Err(e) if is_invalid_nonce(&e) && nonce_refusals < 1 => nonce_refusals += 1,
-                Err(e) => return Err(e).context("Transaction failed"),
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -628,8 +641,6 @@ impl NearSigner {
         // intent explicit at call sites.
         _mpc_contract: &AccountId,
     ) -> Result<FinalExecutionOutcomeView> {
-        let (current_nonce, block_hash) = self.get_tx_context().await?;
-
         let actions = vec![
             Action::CreateAccount(CreateAccountAction {}),
             Action::Transfer(TransferAction {
@@ -666,27 +677,9 @@ impl NearSigner {
             })),
         ];
 
-        let transaction_v0 = TransactionV0 {
-            signer_id: self.account_id.clone(),
-            public_key: self.signer.public_key(),
-            nonce: current_nonce + 1,
-            receiver_id: vault_account_id.clone(),
-            block_hash,
-            actions,
-        };
-        let transaction = Transaction::V0(transaction_v0);
-        let signature = self.signer.sign(transaction.get_hash_and_size().0.as_ref());
-        let signed_transaction =
-            near_primitives::transaction::SignedTransaction::new(signature, transaction);
-
-        let outcome = self
-            .client
-            .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
-                signed_transaction,
-            })
+        self.commit_actions(vault_account_id, actions)
             .await
-            .context("Atomic vault-deploy transaction failed")?;
-        Ok(outcome)
+            .context("Atomic vault-deploy transaction failed")
     }
 
     /// Send a raw function call to an arbitrary receiver (broadcast async, does not wait).
@@ -1268,5 +1261,121 @@ mod finality_tests {
             .expect_err("an invalid transaction is not waited on");
         assert!(format!("{e:#}").contains("could not say whether its block is final"), "{e:#}");
         assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod nonce_retry_tests {
+    use super::fake_rpc::*;
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    const BLOCK: &str = r#"{"author": "node.testnet", "chunks": [], "header": {"approvals": [], "block_body_hash": "11111111111111111111111111111111", "block_merkle_root": "11111111111111111111111111111111", "block_ordinal": 230977814, "challenges_result": [], "challenges_root": "11111111111111111111111111111111", "chunk_endorsements": null, "chunk_headers_root": "11111111111111111111111111111111", "chunk_mask": [], "chunk_receipts_root": "11111111111111111111111111111111", "chunk_tx_root": "11111111111111111111111111111111", "chunks_included": 10, "epoch_id": "11111111111111111111111111111111", "epoch_sync_data_hash": null, "gas_price": "100000000", "hash": "11111111111111111111111111111111", "height": 278986906, "last_ds_final_block": "11111111111111111111111111111111", "last_final_block": "11111111111111111111111111111111", "latest_protocol_version": 88, "next_bp_hash": "11111111111111111111111111111111", "next_epoch_id": "11111111111111111111111111111111", "outcome_root": "11111111111111111111111111111111", "prev_hash": "11111111111111111111111111111111", "prev_height": 278986905, "prev_state_root": "11111111111111111111111111111111", "random_value": "11111111111111111111111111111111", "rent_paid": "0", "shard_split": null, "signature": "ed25519:1111111111111111111111111111111111111111111111111111111111111111", "timestamp": 1795447465768503351, "timestamp_nanosec": "1795447465768503351", "total_supply": "2682033009173494030395088250616153", "validator_proposals": [], "validator_reward": "0"}}"#;
+
+    fn rpc_ok(result: serde_json::Value) -> Answer {
+        (200, serde_json::json!({"jsonrpc": "2.0", "id": "dontcare", "result": result}).to_string())
+    }
+
+    /// The chain refuses a transaction, for a reason other than its nonce.
+    fn tx_expired() -> Answer {
+        (200, r#"{"jsonrpc":"2.0","id":"dontcare","error":{"name":"HANDLER_ERROR","cause":{"name":"INVALID_TRANSACTION","info":{}},"code":-32000,"message":"Server error","data":{"TxExecutionError":{"InvalidTxError":"Expired"}}}}"#.to_string())
+    }
+
+    /// A node whose access key moves on by one with every read, and that
+    /// answers broadcasts from `answers`; the nonces it was sent.
+    fn node(answers: Vec<Answer>) -> (NearSigner, Arc<Mutex<Vec<u64>>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let seen = sent.clone();
+        let reads = Mutex::new(100u64);
+        let url = serve(move |request| match request["method"].as_str() {
+            Some("query") => {
+                assert_eq!(request["params"]["finality"], "optimistic", "{request}");
+                let mut nonce = reads.lock().unwrap();
+                *nonce += 1;
+                rpc_ok(serde_json::json!({
+                    "nonce": *nonce, "permission": "FullAccess", "block_height": 1,
+                    "block_hash": "11111111111111111111111111111111"
+                }))
+            }
+            Some("block") => rpc_ok(serde_json::from_str(BLOCK).expect("block")),
+            Some("broadcast_tx_commit") => {
+                let bytes = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    request["params"][0].as_str().or(request["params"]["signed_tx_base64"].as_str()).expect("tx"),
+                )
+                .expect("base64");
+                let tx: near_primitives::transaction::SignedTransaction = borsh::from_slice(&bytes).expect("tx");
+                let mut sent = seen.lock().unwrap();
+                sent.push(tx.transaction.nonce());
+                answers[sent.len() - 1].clone()
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+        let key = SecretKey::from_random(near_crypto::KeyType::ED25519).to_string();
+        (NearSigner::new(&network(&url), "alice.testnet", &key).expect("signer"), sent)
+    }
+
+    async fn deploy(signer: &NearSigner) -> anyhow::Error {
+        signer
+            .atomic_deploy_vault(
+                &"vault.alice.testnet".parse().unwrap(),
+                1,
+                [7; 32],
+                serde_json::json!({}),
+                1,
+                SecretKey::from_random(near_crypto::KeyType::ED25519).public_key(),
+                &"mpc.testnet".parse().unwrap(),
+            )
+            .await
+            .expect_err("the node accepts nothing")
+    }
+
+    async fn call(signer: &NearSigner) -> anyhow::Error {
+        signer
+            .call_contract("m", serde_json::json!({}), 1, 0)
+            .await
+            .expect_err("the node accepts nothing")
+    }
+
+    /// Refused for its nonce, a vault deploy is signed once more, from a
+    /// nonce read again, and the second answer is the answer.
+    #[tokio::test]
+    async fn a_vault_deploy_refused_for_its_nonce_is_signed_once_more() {
+        let (signer, sent) = node(vec![tx_invalid(), tx_expired()]);
+        let e = deploy(&signer).await;
+        assert!(format!("{e:#}").contains("Atomic vault-deploy transaction failed"), "{e:#}");
+        assert!(format!("{e:#}").contains("xpired"), "{e:#}");
+        assert_eq!(*sent.lock().unwrap(), vec![102, 103]);
+    }
+
+    /// A second refusal for the nonce is the error: nothing is sent a third time.
+    #[tokio::test]
+    async fn a_second_nonce_refusal_ends_the_deploy() {
+        let (signer, sent) = node(vec![tx_invalid(), tx_invalid(), tx_expired()]);
+        deploy(&signer).await;
+        assert_eq!(sent.lock().unwrap().len(), 2);
+    }
+
+    /// Any other failure sends nothing again: a transaction whose answer did
+    /// not come may have run.
+    #[tokio::test]
+    async fn no_other_failure_is_sent_again() {
+        for answer in [tx_expired(), tx_timeout_408(), tx_unavailable_503()] {
+            let (signer, sent) = node(vec![answer.clone(), tx_expired()]);
+            deploy(&signer).await;
+            assert_eq!(sent.lock().unwrap().len(), 1, "deploy: {answer:?}");
+            let (signer, sent) = node(vec![answer.clone(), tx_expired()]);
+            call(&signer).await;
+            assert_eq!(sent.lock().unwrap().len(), 1, "call: {answer:?}");
+        }
+    }
+
+    /// A contract call takes the same one retry.
+    #[tokio::test]
+    async fn a_call_refused_for_its_nonce_is_signed_once_more() {
+        let (signer, sent) = node(vec![tx_invalid(), tx_expired()]);
+        let e = call(&signer).await;
+        assert!(format!("{e:#}").contains("Transaction failed"), "{e:#}");
+        assert_eq!(*sent.lock().unwrap(), vec![102, 103]);
     }
 }
